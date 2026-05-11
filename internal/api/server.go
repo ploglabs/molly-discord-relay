@@ -1,0 +1,260 @@
+package api
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"strings"
+
+	"github.com/ploglabs/molly-discord-relay/internal/models"
+	"github.com/ploglabs/molly-discord-relay/internal/presence"
+	"github.com/ploglabs/molly-discord-relay/internal/storage"
+	"github.com/ploglabs/molly-discord-relay/internal/websocket"
+)
+
+type Server struct {
+	store             *storage.Store
+	hub               *websocket.Hub
+	tracker           *presence.Tracker
+	sendMsg           SendMessageFunc
+	resolveChannelFn  ResolveChannelFunc
+	apiKey            string
+}
+
+type SendMessageFunc func(channelID, username, avatarURL, content string) (string, error)
+type ResolveChannelFunc func(nameOrID string) (string, error)
+
+func NewServer(store *storage.Store, hub *websocket.Hub, tracker *presence.Tracker, sendMsg SendMessageFunc, resolveCh ResolveChannelFunc, apiKey string) *Server {
+	return &Server{
+		store:            store,
+		hub:              hub,
+		tracker:          tracker,
+		sendMsg:          sendMsg,
+		resolveChannelFn: resolveCh,
+		apiKey:           apiKey,
+	}
+}
+
+func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.apiKey == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		key := r.Header.Get("X-API-Key")
+		if key != s.apiKey {
+			slog.Warn("unauthorized request", "path", r.URL.Path, "remote", r.RemoteAddr)
+			writeJSON(w, http.StatusUnauthorized, models.APIResponse{OK: false, Error: "unauthorized"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) SecurityMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) PostMessage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, models.APIResponse{OK: false, Error: "method not allowed"})
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "failed to read body"})
+		return
+	}
+	defer r.Body.Close()
+
+	var req models.SendMessageRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "invalid json"})
+		return
+	}
+
+	req.Channel = strings.TrimSpace(req.Channel)
+	req.Content = strings.ReplaceAll(req.Content, "\x00", "")
+	req.Content = strings.TrimSpace(req.Content)
+	req.Username = strings.TrimSpace(req.Username)
+
+	if req.Channel == "" {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "channel is required"})
+		return
+	}
+	if req.Content == "" {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "content is required"})
+		return
+	}
+	if len(req.Content) > 2000 {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "content exceeds 2000 characters"})
+		return
+	}
+
+	ch, err := s.resolveChannel(req.Channel)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, models.APIResponse{OK: false, Error: "channel not found"})
+		return
+	}
+
+	msgID, err := s.sendMsg(ch, req.Username, req.AvatarURL, req.Content)
+	if err != nil {
+		slog.Error("failed to send message to discord", "error", err)
+		writeJSON(w, http.StatusInternalServerError, models.APIResponse{OK: false, Error: "failed to send message"})
+		return
+	}
+
+	_ = s.store.InsertMessage(models.Message{
+		ID:        msgID,
+		ChannelID: ch,
+		Author:    req.Username,
+		Content:   req.Content,
+		Timestamp: models.TimeNow(),
+	})
+
+	writeJSON(w, http.StatusOK, models.MessageResponse{
+		OK:        true,
+		MessageID: msgID,
+		Channel:   req.Channel,
+		Timestamp: models.TimeNow().Format("2006-01-02T15:04:05Z"),
+	})
+}
+
+func (s *Server) GetHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, models.APIResponse{OK: false, Error: "method not allowed"})
+		return
+	}
+
+	channel := r.URL.Query().Get("channel")
+	if channel == "" {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "channel is required"})
+		return
+	}
+
+	limit := 100
+	if v := r.URL.Query().Get("limit"); v != "" {
+		parsed, err := models.Atoi(v)
+		if err != nil || parsed <= 0 || parsed > 1000 {
+			writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "invalid limit"})
+			return
+		}
+		limit = parsed
+	}
+
+	before := r.URL.Query().Get("before")
+	after := r.URL.Query().Get("after")
+
+	chID, err := s.resolveChannel(channel)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, models.APIResponse{OK: false, Error: "channel not found"})
+		return
+	}
+
+	messages, err := s.store.GetMessages(chID, limit, before, after)
+	if err != nil {
+		slog.Error("failed to fetch history", "error", err)
+		writeJSON(w, http.StatusInternalServerError, models.APIResponse{OK: false, Error: "internal error"})
+		return
+	}
+
+	hasMore := len(messages) == limit
+	writeJSON(w, http.StatusOK, models.HistoryResponse{
+		Messages: messages,
+		HasMore:  hasMore,
+	})
+}
+
+func (s *Server) PostStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, models.APIResponse{OK: false, Error: "method not allowed"})
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "failed to read body"})
+		return
+	}
+	defer r.Body.Close()
+
+	var req models.SetStatusRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "invalid json"})
+		return
+	}
+
+	req.Username = strings.TrimSpace(req.Username)
+	req.Status = strings.ReplaceAll(req.Status, "\x00", "")
+	req.Status = strings.TrimSpace(req.Status)
+
+	if req.Username == "" {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "username is required"})
+		return
+	}
+	if req.Status == "" {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "status is required"})
+		return
+	}
+	if len(req.Status) > 128 {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "status exceeds 128 characters"})
+		return
+	}
+
+	if err := s.tracker.SetStatus(req.Username, req.Username, req.Status); err != nil {
+		slog.Error("failed to set status", "error", err)
+		writeJSON(w, http.StatusInternalServerError, models.APIResponse{OK: false, Error: "internal error"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.APIResponse{OK: true, Message: "status updated"})
+}
+
+func (s *Server) GetPresence(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, models.APIResponse{OK: false, Error: "method not allowed"})
+		return
+	}
+
+	users, err := s.tracker.GetOnlineUsers()
+	if err != nil {
+		slog.Error("failed to get online users", "error", err)
+		writeJSON(w, http.StatusInternalServerError, models.APIResponse{OK: false, Error: "internal error"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.PresenceResponse{Users: users})
+}
+
+func (s *Server) resolveChannel(nameOrID string) (string, error) {
+	ch, err := s.store.GetChannelByName(nameOrID)
+	if err == nil && ch != nil {
+		return ch.ID, nil
+	}
+
+	ch, err = s.store.GetChannelByID(nameOrID)
+	if err == nil && ch != nil {
+		return ch.ID, nil
+	}
+
+	if s.resolveChannelFn != nil {
+		return s.resolveChannelFn(nameOrID)
+	}
+
+	return "", fmt.Errorf("channel not found: %s", nameOrID)
+}
+
+func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}

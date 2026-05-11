@@ -1,0 +1,311 @@
+package storage
+
+import (
+	"database/sql"
+	"fmt"
+	"log/slog"
+	"sync"
+	"time"
+
+	_ "modernc.org/sqlite"
+
+	"github.com/ploglabs/molly-discord-relay/internal/models"
+)
+
+type Store struct {
+	db *sql.DB
+	mu sync.RWMutex
+}
+
+func Open(path string) (*Store, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		return nil, fmt.Errorf("set WAL mode: %w", err)
+	}
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		return nil, fmt.Errorf("set busy timeout: %w", err)
+	}
+
+	s := &Store{db: db}
+	if err := s.migrate(); err != nil {
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+
+	slog.Info("storage opened", "path", path)
+	return s, nil
+}
+
+func (s *Store) Close() error {
+	slog.Info("storage closing")
+	return s.db.Close()
+}
+
+func (s *Store) migrate() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	schema := `
+	CREATE TABLE IF NOT EXISTS users (
+		id TEXT PRIMARY KEY,
+		username TEXT NOT NULL,
+		online INTEGER DEFAULT 0,
+		last_seen DATETIME
+	);
+	CREATE TABLE IF NOT EXISTS messages (
+		id TEXT PRIMARY KEY,
+		channel_id TEXT NOT NULL,
+		author TEXT NOT NULL,
+		content TEXT NOT NULL,
+		timestamp DATETIME NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS statuses (
+		user_id TEXT PRIMARY KEY,
+		status TEXT NOT NULL,
+		updated_at DATETIME NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS channels (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		guild_id TEXT
+	);
+	CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, timestamp);
+	CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
+	`
+
+	_, err := s.db.Exec(schema)
+	return err
+}
+
+func (s *Store) UpsertUser(u models.User) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(
+		"INSERT OR REPLACE INTO users (id, username, online, last_seen) VALUES (?, ?, ?, ?)",
+		u.ID, u.Username, u.Online, u.LastSeen,
+	)
+	return err
+}
+
+func (s *Store) GetUser(id string) (*models.User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var u models.User
+	var online int
+	err := s.db.QueryRow("SELECT id, username, online, last_seen FROM users WHERE id = ?", id).
+		Scan(&u.ID, &u.Username, &online, &u.LastSeen)
+	if err != nil {
+		return nil, err
+	}
+	u.Online = online == 1
+	return &u, nil
+}
+
+func (s *Store) SetUserOnline(id, username string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(
+		"INSERT OR REPLACE INTO users (id, username, online, last_seen) VALUES (?, ?, 1, ?)",
+		id, username, time.Now(),
+	)
+	return err
+}
+
+func (s *Store) SetUserOffline(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(
+		"UPDATE users SET online = 0, last_seen = ? WHERE id = ?",
+		time.Now(), id,
+	)
+	return err
+}
+
+func (s *Store) ListOnlineUsers() ([]models.User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query("SELECT id, username, online, last_seen FROM users WHERE online = 1")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []models.User
+	for rows.Next() {
+		var u models.User
+		var online int
+		if err := rows.Scan(&u.ID, &u.Username, &online, &u.LastSeen); err != nil {
+			return nil, err
+		}
+		u.Online = online == 1
+		users = append(users, u)
+	}
+	return users, rows.Err()
+}
+
+func (s *Store) InsertMessage(m models.Message) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(
+		"INSERT OR REPLACE INTO messages (id, channel_id, author, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+		m.ID, m.ChannelID, m.Author, m.Content, m.Timestamp,
+	)
+	return err
+}
+
+func (s *Store) GetMessages(channelID string, limit int, before, after string) ([]models.Message, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+
+	var query string
+	var args []interface{}
+
+	args = append(args, channelID, limit)
+
+	switch {
+	case before != "" && after != "":
+		query = "SELECT id, channel_id, author, content, timestamp FROM messages WHERE channel_id = ? AND timestamp > (SELECT timestamp FROM messages WHERE id = ?) AND timestamp < (SELECT timestamp FROM messages WHERE id = ?) ORDER BY timestamp DESC LIMIT ?"
+		args = append(args, after, before)
+	case before != "":
+		query = "SELECT id, channel_id, author, content, timestamp FROM messages WHERE channel_id = ? AND timestamp < (SELECT timestamp FROM messages WHERE id = ?) ORDER BY timestamp DESC LIMIT ?"
+		args = append(args, before)
+	case after != "":
+		query = "SELECT id, channel_id, author, content, timestamp FROM messages WHERE channel_id = ? AND timestamp > (SELECT timestamp FROM messages WHERE id = ?) ORDER BY timestamp ASC LIMIT ?"
+		args = append(args, after)
+	default:
+		query = "SELECT id, channel_id, author, content, timestamp FROM messages WHERE channel_id = ? ORDER BY timestamp DESC LIMIT ?"
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []models.Message
+	for rows.Next() {
+		var m models.Message
+		if err := rows.Scan(&m.ID, &m.ChannelID, &m.Author, &m.Content, &m.Timestamp); err != nil {
+			return nil, err
+		}
+		messages = append(messages, m)
+	}
+	return messages, rows.Err()
+}
+
+func (s *Store) DeleteMessage(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec("DELETE FROM messages WHERE id = ?", id)
+	return err
+}
+
+func (s *Store) UpdateMessage(m models.Message) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(
+		"UPDATE messages SET content = ?, author = ? WHERE id = ?",
+		m.Content, m.Author, m.ID,
+	)
+	return err
+}
+
+func (s *Store) SetStatus(userID, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(
+		"INSERT OR REPLACE INTO statuses (user_id, status, updated_at) VALUES (?, ?, ?)",
+		userID, status, time.Now(),
+	)
+	return err
+}
+
+func (s *Store) GetStatus(userID string) (*models.Status, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var st models.Status
+	err := s.db.QueryRow("SELECT user_id, status, updated_at FROM statuses WHERE user_id = ?", userID).
+		Scan(&st.UserID, &st.Status, &st.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &st, nil
+}
+
+func (s *Store) GetAllStatuses() ([]models.Status, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query("SELECT user_id, status, updated_at FROM statuses")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var statuses []models.Status
+	for rows.Next() {
+		var st models.Status
+		if err := rows.Scan(&st.UserID, &st.Status, &st.UpdatedAt); err != nil {
+			return nil, err
+		}
+		statuses = append(statuses, st)
+	}
+	return statuses, rows.Err()
+}
+
+func (s *Store) UpsertChannel(c models.Channel) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(
+		"INSERT OR REPLACE INTO channels (id, name, guild_id) VALUES (?, ?, ?)",
+		c.ID, c.Name, c.GuildID,
+	)
+	return err
+}
+
+func (s *Store) GetChannelByName(name string) (*models.Channel, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var c models.Channel
+	err := s.db.QueryRow("SELECT id, name, guild_id FROM channels WHERE name = ?", name).
+		Scan(&c.ID, &c.Name, &c.GuildID)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+func (s *Store) GetChannelByID(id string) (*models.Channel, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var c models.Channel
+	err := s.db.QueryRow("SELECT id, name, guild_id FROM channels WHERE id = ?", id).
+		Scan(&c.ID, &c.Name, &c.GuildID)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
