@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/ploglabs/molly-discord-relay/internal/models"
 	"github.com/ploglabs/molly-discord-relay/internal/presence"
 	"github.com/ploglabs/molly-discord-relay/internal/storage"
@@ -15,12 +17,12 @@ import (
 )
 
 type Server struct {
-	store             *storage.Store
-	hub               *websocket.Hub
-	tracker           *presence.Tracker
-	sendMsg           SendMessageFunc
-	resolveChannelFn  ResolveChannelFunc
-	apiKey            string
+	store            *storage.Store
+	hub              *websocket.Hub
+	tracker          *presence.Tracker
+	sendMsg          SendMessageFunc
+	resolveChannelFn ResolveChannelFunc
+	apiKey           string
 }
 
 type SendMessageFunc func(channelID, username, avatarURL, content string) (string, error)
@@ -233,6 +235,101 @@ func (s *Server) GetPresence(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, models.PresenceResponse{Users: users})
+}
+
+func (s *Server) GetChannels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, models.APIResponse{OK: false, Error: "method not allowed"})
+		return
+	}
+
+	channels, err := s.store.GetChannels()
+	if err != nil {
+		slog.Error("failed to get channels", "error", err)
+		writeJSON(w, http.StatusInternalServerError, models.APIResponse{OK: false, Error: "internal error"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, channels)
+}
+
+type terminalMessage struct {
+	ID        string    `json:"id"`
+	Username  string    `json:"username"`
+	Content   string    `json:"content"`
+	Channel   string    `json:"channel"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// GetChannelMessages serves GET /api/channels/{channel}/messages for molly-terminal.
+// Returns messages in the format expected by the terminal client.
+func (s *Server) GetChannelMessages(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, models.APIResponse{OK: false, Error: "method not allowed"})
+		return
+	}
+
+	channel := chi.URLParam(r, "channel")
+	if channel == "" {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "channel is required"})
+		return
+	}
+
+	limit := 100
+	if v := r.URL.Query().Get("limit"); v != "" {
+		parsed, err := models.Atoi(v)
+		if err != nil || parsed <= 0 || parsed > 1000 {
+			writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "invalid limit"})
+			return
+		}
+		limit = parsed
+	}
+
+	var before *time.Time
+	if v := r.URL.Query().Get("before"); v != "" {
+		t, err := time.Parse(time.RFC3339Nano, v)
+		if err != nil {
+			t2, err2 := time.Parse(time.RFC3339, v)
+			if err2 != nil {
+				writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "invalid before timestamp"})
+				return
+			}
+			t = t2
+		}
+		before = &t
+	}
+
+	chID, err := s.resolveChannel(channel)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, models.APIResponse{OK: false, Error: "channel not found"})
+		return
+	}
+
+	chName := channel
+	if ch, err2 := s.store.GetChannelByID(chID); err2 == nil && ch != nil {
+		chName = ch.Name
+	}
+
+	messages, err := s.store.GetMessagesByChannelTimestamp(chID, limit, before)
+	if err != nil {
+		slog.Error("failed to fetch channel messages", "error", err)
+		writeJSON(w, http.StatusInternalServerError, models.APIResponse{OK: false, Error: "internal error"})
+		return
+	}
+
+	result := make([]terminalMessage, 0, len(messages))
+	for _, m := range messages {
+		result = append(result, terminalMessage{
+			ID:        m.ID,
+			Username:  m.Author,
+			Content:   m.Content,
+			Channel:   chName,
+			Timestamp: m.Timestamp,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
 
 func (s *Server) resolveChannel(nameOrID string) (string, error) {

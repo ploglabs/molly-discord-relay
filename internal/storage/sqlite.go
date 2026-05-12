@@ -209,6 +209,43 @@ func (s *Store) GetMessages(channelID string, limit int, before, after string) (
 	return messages, rows.Err()
 }
 
+func (s *Store) GetMessagesByChannelTimestamp(channelID string, limit int, before *time.Time) ([]models.Message, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+
+	var rows *sql.Rows
+	var err error
+	if before != nil {
+		rows, err = s.db.Query(
+			"SELECT id, channel_id, author, content, timestamp FROM messages WHERE channel_id = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT ?",
+			channelID, before.UTC(), limit,
+		)
+	} else {
+		rows, err = s.db.Query(
+			"SELECT id, channel_id, author, content, timestamp FROM messages WHERE channel_id = ? ORDER BY timestamp DESC LIMIT ?",
+			channelID, limit,
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []models.Message
+	for rows.Next() {
+		var m models.Message
+		if err := rows.Scan(&m.ID, &m.ChannelID, &m.Author, &m.Content, &m.Timestamp); err != nil {
+			return nil, err
+		}
+		messages = append(messages, m)
+	}
+	return messages, rows.Err()
+}
+
 func (s *Store) DeleteMessage(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -282,6 +319,27 @@ func (s *Store) UpsertChannel(c models.Channel) error {
 		c.ID, c.Name, c.GuildID,
 	)
 	return err
+}
+
+func (s *Store) GetChannels() ([]models.Channel, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query("SELECT id, name, guild_id FROM channels ORDER BY name")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var channels []models.Channel
+	for rows.Next() {
+		var c models.Channel
+		if err := rows.Scan(&c.ID, &c.Name, &c.GuildID); err != nil {
+			return nil, err
+		}
+		channels = append(channels, c)
+	}
+	return channels, rows.Err()
 }
 
 func (s *Store) GetChannelByName(name string) (*models.Channel, error) {

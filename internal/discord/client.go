@@ -154,7 +154,7 @@ func (b *Bot) onReady(s *discordgo.Session, r *discordgo.Ready) {
 	}
 }
 
-func (b *Bot) onRateLimit(rl *discordgo.RateLimit) {
+func (b *Bot) onRateLimit(s *discordgo.Session, rl *discordgo.RateLimit) {
 	slog.Warn("discord rate limit", "retry_after", rl.RetryAfter)
 }
 

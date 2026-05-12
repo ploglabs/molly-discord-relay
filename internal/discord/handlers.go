@@ -8,7 +8,7 @@ import (
 )
 
 func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
-	if m.Author.Bot {
+	if m.Author.Bot && m.WebhookID == "" {
 		return
 	}
 
@@ -80,15 +80,34 @@ func (b *Bot) onMessageDelete(s *discordgo.Session, m *discordgo.MessageDelete) 
 
 func (b *Bot) onTypingStart(s *discordgo.Session, t *discordgo.TypingStart) {
 	chName := b.channelName(t.ChannelID)
+
+	username := b.usernameForTyping(s, t.GuildID, t.UserID)
+
 	evt := models.RelayEvent{
 		Type:      "typing_start",
 		Channel:   chName,
 		ChannelID: t.ChannelID,
+		Username:  username,
 		UserID:    t.UserID,
 		Timestamp: time.Now().Format(time.RFC3339),
 	}
 
 	b.broadcast(evt)
+}
+
+func (b *Bot) usernameForTyping(s *discordgo.Session, guildID, userID string) string {
+	if guildID != "" {
+		if member, err := s.State.Member(guildID, userID); err == nil && member != nil && member.User != nil {
+			return member.User.Username
+		}
+		if member, err := s.GuildMember(guildID, userID); err == nil && member != nil && member.User != nil {
+			return member.User.Username
+		}
+	}
+	if user, err := s.User(userID); err == nil && user != nil {
+		return user.Username
+	}
+	return userID
 }
 
 func (b *Bot) onGuildMemberAdd(s *discordgo.Session, m *discordgo.GuildMemberAdd) {

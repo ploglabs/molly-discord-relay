@@ -90,6 +90,8 @@ func main() {
 		r.Post("/status", srv.PostStatus)
 		r.Get("/history", srv.GetHistory)
 		r.Get("/presence", srv.GetPresence)
+		r.Get("/api/channels", srv.GetChannels)
+		r.Get("/api/channels/{channel}/messages", srv.GetChannelMessages)
 	})
 
 	r.Get("/ws", func(w http.ResponseWriter, r *http.Request) {
