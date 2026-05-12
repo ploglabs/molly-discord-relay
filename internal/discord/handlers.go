@@ -24,6 +24,14 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 		Timestamp: m.Timestamp.Format(time.RFC3339),
 	}
 
+	if m.ReferencedMessage != nil {
+		evt.ReplyToID = m.ReferencedMessage.ID
+		evt.ReplyToContent = m.ReferencedMessage.Content
+		if m.ReferencedMessage.Author != nil {
+			evt.ReplyToAuthor = m.ReferencedMessage.Author.Username
+		}
+	}
+
 	b.broadcast(evt)
 	_ = b.store.InsertMessage(models.Message{
 		ID:        m.ID,

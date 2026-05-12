@@ -1,7 +1,9 @@
 package websocket
 
 import (
+	"encoding/json"
 	"log/slog"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,6 +16,9 @@ type Hub struct {
 	unregister chan *Client
 	mu         sync.RWMutex
 	clientCount atomic.Int64
+
+	usernames map[*Client]string
+	userMu    sync.RWMutex
 }
 
 func NewHub() *Hub {
@@ -22,6 +27,7 @@ func NewHub() *Hub {
 		broadcast:  make(chan []byte, 256),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
+		usernames:  make(map[*Client]string),
 	}
 }
 
@@ -45,6 +51,7 @@ func (h *Hub) Run() {
 			h.mu.Unlock()
 			h.clientCount.Add(-1)
 			slog.Info("client disconnected", "remote", client.conn.RemoteAddr().String(), "total", h.clientCount.Load())
+			h.RemoveUsername(client)
 
 		case message := <-h.broadcast:
 			h.mu.RLock()
@@ -83,6 +90,57 @@ func (h *Hub) Unregister(client *Client) {
 
 func (h *Hub) ClientCount() int64 {
 	return h.clientCount.Load()
+}
+
+func (h *Hub) SetUsername(client *Client, username string) {
+	h.userMu.Lock()
+	h.usernames[client] = username
+	h.userMu.Unlock()
+	h.broadcastTerminalUsers()
+}
+
+func (h *Hub) RemoveUsername(client *Client) {
+	h.userMu.Lock()
+	had := h.usernames[client] != ""
+	delete(h.usernames, client)
+	h.userMu.Unlock()
+	if had {
+		h.broadcastTerminalUsers()
+	}
+}
+
+func (h *Hub) GetTerminalUsers() []string {
+	h.userMu.RLock()
+	defer h.userMu.RUnlock()
+	seen := make(map[string]struct{})
+	var users []string
+	for _, u := range h.usernames {
+		if u == "" {
+			continue
+		}
+		if _, ok := seen[u]; !ok {
+			seen[u] = struct{}{}
+			users = append(users, u)
+		}
+	}
+	sort.Strings(users)
+	return users
+}
+
+func (h *Hub) broadcastTerminalUsers() {
+	users := h.GetTerminalUsers()
+	if users == nil {
+		users = []string{}
+	}
+	evt := struct {
+		Type  string   `json:"type"`
+		Users []string `json:"users"`
+	}{Type: "terminal_online", Users: users}
+	data, err := json.Marshal(evt)
+	if err != nil {
+		return
+	}
+	h.Broadcast(data)
 }
 
 func (h *Hub) Shutdown() {

@@ -2,7 +2,10 @@ package discord
 
 import (
 	"encoding/json"
+	"io"
 	"log/slog"
+	"regexp"
+	"strings"
 	"sync"
 
 	"github.com/bwmarrin/discordgo"
@@ -15,6 +18,8 @@ type webhookEntry struct {
 	ID    string
 	Token string
 }
+
+var mentionPattern = regexp.MustCompile(`(^|[\s(])@([A-Za-z0-9_.-]{2,32})`)
 
 type Bot struct {
 	session      *discordgo.Session
@@ -68,11 +73,32 @@ func (b *Bot) Session() *discordgo.Session {
 	return b.session
 }
 
-func (b *Bot) SendWebhookMessage(channelID, username, avatarURL, content string) (string, error) {
+func (b *Bot) SendWebhookMessage(channelID, username, avatarURL, content, replyToID string) (string, error) {
+	content = b.resolveMentions(channelID, content)
+	if replyToID != "" {
+		msg, err := b.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+			Content: content,
+			Reference: &discordgo.MessageReference{
+				MessageID: replyToID,
+				ChannelID: channelID,
+			},
+		})
+		if err != nil {
+			return "", err
+		}
+		return msg.ID, nil
+	}
+
 	wh, err := b.getOrCreateWebhook(channelID)
 	if err != nil {
-		slog.Error("failed to get webhook", "channel_id", channelID, "error", err)
-		return "", err
+		slog.Warn("webhook unavailable, falling back to bot message", "channel_id", channelID, "error", err)
+		msg, sendErr := b.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+			Content: botAuthoredContent(username, content),
+		})
+		if sendErr != nil {
+			return "", sendErr
+		}
+		return msg.ID, nil
 	}
 
 	msg, err := b.session.WebhookExecute(wh.ID, wh.Token, false, &discordgo.WebhookParams{
@@ -85,6 +111,83 @@ func (b *Bot) SendWebhookMessage(channelID, username, avatarURL, content string)
 	}
 
 	return msg.ID, nil
+}
+
+func (b *Bot) SendWebhookFile(channelID, username, avatarURL, content, filename string, reader io.Reader) (string, error) {
+	content = b.resolveMentions(channelID, content)
+	wh, err := b.getOrCreateWebhook(channelID)
+	if err != nil {
+		slog.Warn("webhook unavailable, falling back to bot file message", "channel_id", channelID, "error", err)
+		msg, sendErr := b.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+			Content: botAuthoredContent(username, content),
+			Files: []*discordgo.File{{
+				Name:   filename,
+				Reader: reader,
+			}},
+		})
+		if sendErr != nil {
+			return "", sendErr
+		}
+		return msg.ID, nil
+	}
+	msg, err := b.session.WebhookExecute(wh.ID, wh.Token, false, &discordgo.WebhookParams{
+		Content:   content,
+		Username:  username,
+		AvatarURL: avatarURL,
+		Files: []*discordgo.File{{
+			Name:   filename,
+			Reader: reader,
+		}},
+	})
+	if err != nil {
+		return "", err
+	}
+	return msg.ID, nil
+}
+
+func botAuthoredContent(username, content string) string {
+	if username == "" {
+		return content
+	}
+	if content == "" {
+		return "**" + username + "**"
+	}
+	return "**" + username + "**: " + content
+}
+
+func (b *Bot) resolveMentions(channelID, content string) string {
+	if !strings.Contains(content, "@") {
+		return content
+	}
+	ch, err := b.session.Channel(channelID)
+	if err != nil || ch == nil || ch.GuildID == "" {
+		if stored, err := b.store.GetChannelByID(channelID); err == nil && stored != nil {
+			ch = &discordgo.Channel{GuildID: stored.GuildID}
+		}
+	}
+	if ch == nil || ch.GuildID == "" {
+		return content
+	}
+
+	return mentionPattern.ReplaceAllStringFunc(content, func(match string) string {
+		prefix := ""
+		name := match
+		if strings.HasPrefix(match, "@") {
+			name = strings.TrimPrefix(match, "@")
+		} else {
+			prefix = match[:1]
+			name = strings.TrimPrefix(match[1:], "@")
+		}
+		members, err := b.session.GuildMembersSearch(ch.GuildID, name, 1)
+		if err != nil || len(members) == 0 || members[0].User == nil {
+			return match
+		}
+		user := members[0].User
+		if !strings.EqualFold(user.Username, name) && !strings.HasPrefix(strings.ToLower(user.Username), strings.ToLower(name)) {
+			return match
+		}
+		return prefix + "<@" + user.ID + ">"
+	})
 }
 
 func (b *Bot) getOrCreateWebhook(channelID string) (webhookEntry, error) {
@@ -100,6 +203,7 @@ func (b *Bot) getOrCreateWebhook(channelID string) (webhookEntry, error) {
 
 	webhooks, err := b.session.ChannelWebhooks(channelID)
 	if err != nil {
+		slog.Warn("failed to list channel webhooks", "channel_id", channelID, "error", err)
 		return webhookEntry{}, err
 	}
 
@@ -113,6 +217,7 @@ func (b *Bot) getOrCreateWebhook(channelID string) (webhookEntry, error) {
 
 	wh, err := b.session.WebhookCreate(channelID, "molly-relay", "")
 	if err != nil {
+		slog.Warn("failed to create webhook", "channel_id", channelID, "error", err)
 		return webhookEntry{}, err
 	}
 
@@ -145,10 +250,15 @@ func (b *Bot) onReady(s *discordgo.Session, r *discordgo.Ready) {
 			continue
 		}
 		for _, ch := range channels {
+			chType := "voice"
+			if ch.Type == discordgo.ChannelTypeGuildText || ch.Type == discordgo.ChannelTypeGuildNews {
+				chType = "text"
+			}
 			_ = b.store.UpsertChannel(models.Channel{
 				ID:      ch.ID,
 				Name:    ch.Name,
 				GuildID: ch.GuildID,
+				Type:    chType,
 			})
 		}
 	}

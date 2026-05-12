@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"time"
@@ -11,23 +12,24 @@ import (
 const (
 	writeWait      = 10 * time.Second
 	pongWait       = 60 * time.Second
-	pingPeriod      = 30 * time.Second
-	maxMessageSize = 1024
+	pingPeriod     = 30 * time.Second
+	maxMessageSize = 4096
 	sendBufferSize = 256
 )
 
 var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
+	ReadBufferSize:  4096,
+	WriteBufferSize: 4096,
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
 }
 
 type Client struct {
-	hub *Hub
-	conn *websocket.Conn
-	send chan []byte
+	hub      *Hub
+	conn     *websocket.Conn
+	send     chan []byte
+	username string
 }
 
 func NewClient(hub *Hub, conn *websocket.Conn) *Client {
@@ -40,6 +42,7 @@ func NewClient(hub *Hub, conn *websocket.Conn) *Client {
 
 func (c *Client) readPump() {
 	defer func() {
+		c.hub.RemoveUsername(c)
 		c.hub.Unregister(c)
 		c.conn.Close()
 	}()
@@ -52,12 +55,28 @@ func (c *Client) readPump() {
 	})
 
 	for {
-		_, _, err := c.conn.ReadMessage()
+		_, message, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
 				slog.Error("websocket read error", "error", err)
 			}
 			break
+		}
+
+		var action struct {
+			Action   string `json:"action"`
+			Username string `json:"username"`
+			Channel  string `json:"channel"`
+		}
+		if err := json.Unmarshal(message, &action); err == nil {
+			switch action.Action {
+			case "identify":
+				if action.Username != "" && action.Username != c.username {
+					c.username = action.Username
+					c.hub.SetUsername(c, action.Username)
+					slog.Debug("client identified", "username", action.Username)
+				}
+			}
 		}
 	}
 }

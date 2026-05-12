@@ -21,19 +21,22 @@ type Server struct {
 	hub              *websocket.Hub
 	tracker          *presence.Tracker
 	sendMsg          SendMessageFunc
+	sendFile         SendFileFunc
 	resolveChannelFn ResolveChannelFunc
 	apiKey           string
 }
 
-type SendMessageFunc func(channelID, username, avatarURL, content string) (string, error)
+type SendMessageFunc func(channelID, username, avatarURL, content, replyToID string) (string, error)
+type SendFileFunc func(channelID, username, avatarURL, content, filename string, r io.Reader) (string, error)
 type ResolveChannelFunc func(nameOrID string) (string, error)
 
-func NewServer(store *storage.Store, hub *websocket.Hub, tracker *presence.Tracker, sendMsg SendMessageFunc, resolveCh ResolveChannelFunc, apiKey string) *Server {
+func NewServer(store *storage.Store, hub *websocket.Hub, tracker *presence.Tracker, sendMsg SendMessageFunc, sendFile SendFileFunc, resolveCh ResolveChannelFunc, apiKey string) *Server {
 	return &Server{
 		store:            store,
 		hub:              hub,
 		tracker:          tracker,
 		sendMsg:          sendMsg,
+		sendFile:         sendFile,
 		resolveChannelFn: resolveCh,
 		apiKey:           apiKey,
 	}
@@ -60,7 +63,7 @@ func (s *Server) SecurityMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		r.Body = http.MaxBytesReader(w, r.Body, 25<<20)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -108,7 +111,7 @@ func (s *Server) PostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msgID, err := s.sendMsg(ch, req.Username, req.AvatarURL, req.Content)
+	msgID, err := s.sendMsg(ch, req.Username, req.AvatarURL, terminalAuthoredContent(req.Username, req.Content, req.ReplyToID), req.ReplyToID)
 	if err != nil {
 		slog.Error("failed to send message to discord", "error", err)
 		writeJSON(w, http.StatusInternalServerError, models.APIResponse{OK: false, Error: "failed to send message"})
@@ -129,6 +132,76 @@ func (s *Server) PostMessage(w http.ResponseWriter, r *http.Request) {
 		Channel:   req.Channel,
 		Timestamp: models.TimeNow().Format("2006-01-02T15:04:05Z"),
 	})
+}
+
+func (s *Server) PostFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, models.APIResponse{OK: false, Error: "method not allowed"})
+		return
+	}
+	if s.sendFile == nil {
+		writeJSON(w, http.StatusServiceUnavailable, models.APIResponse{OK: false, Error: "file sending is not configured"})
+		return
+	}
+	if err := r.ParseMultipartForm(25 << 20); err != nil {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "invalid multipart form"})
+		return
+	}
+
+	channel := strings.TrimSpace(r.FormValue("channel"))
+	username := strings.TrimSpace(r.FormValue("username"))
+	avatarURL := strings.TrimSpace(r.FormValue("avatar_url"))
+	content := strings.TrimSpace(strings.ReplaceAll(r.FormValue("content"), "\x00", ""))
+	if channel == "" || username == "" {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "channel and username are required"})
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "file is required"})
+		return
+	}
+	defer file.Close()
+
+	ch, err := s.resolveChannel(channel)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, models.APIResponse{OK: false, Error: "channel not found"})
+		return
+	}
+
+	msgID, err := s.sendFile(ch, username, avatarURL, content, header.Filename, file)
+	if err != nil {
+		slog.Error("failed to send file to discord", "error", err)
+		writeJSON(w, http.StatusInternalServerError, models.APIResponse{OK: false, Error: "failed to send file"})
+		return
+	}
+
+	storedContent := content
+	if storedContent == "" {
+		storedContent = header.Filename
+	}
+	_ = s.store.InsertMessage(models.Message{
+		ID:        msgID,
+		ChannelID: ch,
+		Author:    username,
+		Content:   storedContent,
+		Timestamp: models.TimeNow(),
+	})
+
+	writeJSON(w, http.StatusOK, models.MessageResponse{
+		OK:        true,
+		MessageID: msgID,
+		Channel:   channel,
+		Timestamp: models.TimeNow().Format(time.RFC3339),
+	})
+}
+
+func terminalAuthoredContent(username, content, replyToID string) string {
+	if replyToID == "" || username == "" {
+		return content
+	}
+	return fmt.Sprintf("**%s**: %s", username, content)
 }
 
 func (s *Server) GetHistory(w http.ResponseWriter, r *http.Request) {
@@ -235,6 +308,18 @@ func (s *Server) GetPresence(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, models.PresenceResponse{Users: users})
+}
+
+func (s *Server) GetTerminalUsers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, models.APIResponse{OK: false, Error: "method not allowed"})
+		return
+	}
+	users := s.hub.GetTerminalUsers()
+	if users == nil {
+		users = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"users": users})
 }
 
 func (s *Server) GetChannels(w http.ResponseWriter, r *http.Request) {

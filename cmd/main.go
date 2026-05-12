@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 
@@ -52,8 +54,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	sendMsg := func(channelID, username, avatarURL, content string) (string, error) {
-		return bot.SendWebhookMessage(channelID, username, avatarURL, content)
+	sendMsg := func(channelID, username, avatarURL, content, replyToID string) (string, error) {
+		return bot.SendWebhookMessage(channelID, username, avatarURL, content, replyToID)
+	}
+	sendFile := func(channelID, username, avatarURL, content, filename string, r io.Reader) (string, error) {
+		return bot.SendWebhookFile(channelID, username, avatarURL, content, filename, r)
 	}
 
 	tracker := presence.NewTracker(store, hub)
@@ -61,15 +66,20 @@ func main() {
 	resolveChannel := func(nameOrID string) (string, error) {
 		ch, err := bot.Session().Channel(nameOrID)
 		if err == nil && ch != nil {
-			_ = store.UpsertChannel(models.Channel{ID: ch.ID, Name: ch.Name, GuildID: ch.GuildID})
-			return ch.ID, nil
+			if ch.Type == discordgo.ChannelTypeGuildText || ch.Type == discordgo.ChannelTypeGuildNews {
+				_ = store.UpsertChannel(models.Channel{ID: ch.ID, Name: ch.Name, GuildID: ch.GuildID, Type: "text"})
+				return ch.ID, nil
+			}
+			return "", fmt.Errorf("channel not found: %s", nameOrID)
 		}
 
 		for _, g := range bot.Session().State.Guilds {
 			for _, c := range g.Channels {
 				if c.Name == nameOrID {
-					_ = store.UpsertChannel(models.Channel{ID: c.ID, Name: c.Name, GuildID: g.ID})
-					return c.ID, nil
+					if c.Type == discordgo.ChannelTypeGuildText || c.Type == discordgo.ChannelTypeGuildNews {
+						_ = store.UpsertChannel(models.Channel{ID: c.ID, Name: c.Name, GuildID: g.ID, Type: "text"})
+						return c.ID, nil
+					}
 				}
 			}
 		}
@@ -77,7 +87,7 @@ func main() {
 		return "", fmt.Errorf("channel not found: %s", nameOrID)
 	}
 
-	srv := api.NewServer(store, hub, tracker, sendMsg, resolveChannel, cfg.APIKey)
+	srv := api.NewServer(store, hub, tracker, sendMsg, sendFile, resolveChannel, cfg.APIKey)
 
 	r := chi.NewRouter()
 	r.Use(chimw.Logger)
@@ -87,11 +97,13 @@ func main() {
 	r.Group(func(r chi.Router) {
 		r.Use(srv.AuthMiddleware)
 		r.Post("/message", srv.PostMessage)
+		r.Post("/file", srv.PostFile)
 		r.Post("/status", srv.PostStatus)
 		r.Get("/history", srv.GetHistory)
 		r.Get("/presence", srv.GetPresence)
 		r.Get("/api/channels", srv.GetChannels)
 		r.Get("/api/channels/{channel}/messages", srv.GetChannelMessages)
+		r.Get("/api/terminal/users", srv.GetTerminalUsers)
 	})
 
 	r.Get("/ws", func(w http.ResponseWriter, r *http.Request) {

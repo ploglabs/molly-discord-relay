@@ -73,14 +73,18 @@ func (s *Store) migrate() error {
 	CREATE TABLE IF NOT EXISTS channels (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
-		guild_id TEXT
+		guild_id TEXT,
+		type TEXT NOT NULL DEFAULT 'text'
 	);
 	CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, timestamp);
 	CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
 	`
 
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	_, _ = s.db.Exec("ALTER TABLE channels ADD COLUMN type TEXT NOT NULL DEFAULT 'text'")
+	return nil
 }
 
 func (s *Store) UpsertUser(u models.User) error {
@@ -246,6 +250,20 @@ func (s *Store) GetMessagesByChannelTimestamp(channelID string, limit int, befor
 	return messages, rows.Err()
 }
 
+func (s *Store) GetMessageByID(id string) (*models.Message, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var m models.Message
+	err := s.db.QueryRow(
+		"SELECT id, channel_id, author, content, timestamp FROM messages WHERE id = ?", id,
+	).Scan(&m.ID, &m.ChannelID, &m.Author, &m.Content, &m.Timestamp)
+	if err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
 func (s *Store) DeleteMessage(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -314,9 +332,12 @@ func (s *Store) UpsertChannel(c models.Channel) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if c.Type == "" {
+		c.Type = "text"
+	}
 	_, err := s.db.Exec(
-		"INSERT OR REPLACE INTO channels (id, name, guild_id) VALUES (?, ?, ?)",
-		c.ID, c.Name, c.GuildID,
+		"INSERT OR REPLACE INTO channels (id, name, guild_id, type) VALUES (?, ?, ?, ?)",
+		c.ID, c.Name, c.GuildID, c.Type,
 	)
 	return err
 }
@@ -325,7 +346,7 @@ func (s *Store) GetChannels() ([]models.Channel, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.Query("SELECT id, name, guild_id FROM channels ORDER BY name")
+	rows, err := s.db.Query("SELECT id, name, guild_id, type FROM channels WHERE type = 'text' ORDER BY name")
 	if err != nil {
 		return nil, err
 	}
@@ -334,7 +355,7 @@ func (s *Store) GetChannels() ([]models.Channel, error) {
 	var channels []models.Channel
 	for rows.Next() {
 		var c models.Channel
-		if err := rows.Scan(&c.ID, &c.Name, &c.GuildID); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.GuildID, &c.Type); err != nil {
 			return nil, err
 		}
 		channels = append(channels, c)
@@ -347,8 +368,8 @@ func (s *Store) GetChannelByName(name string) (*models.Channel, error) {
 	defer s.mu.RUnlock()
 
 	var c models.Channel
-	err := s.db.QueryRow("SELECT id, name, guild_id FROM channels WHERE name = ?", name).
-		Scan(&c.ID, &c.Name, &c.GuildID)
+	err := s.db.QueryRow("SELECT id, name, guild_id, type FROM channels WHERE name = ? AND type = 'text'", name).
+		Scan(&c.ID, &c.Name, &c.GuildID, &c.Type)
 	if err != nil {
 		return nil, err
 	}
@@ -360,8 +381,8 @@ func (s *Store) GetChannelByID(id string) (*models.Channel, error) {
 	defer s.mu.RUnlock()
 
 	var c models.Channel
-	err := s.db.QueryRow("SELECT id, name, guild_id FROM channels WHERE id = ?", id).
-		Scan(&c.ID, &c.Name, &c.GuildID)
+	err := s.db.QueryRow("SELECT id, name, guild_id, type FROM channels WHERE id = ? AND type = 'text'", id).
+		Scan(&c.ID, &c.Name, &c.GuildID, &c.Type)
 	if err != nil {
 		return nil, err
 	}

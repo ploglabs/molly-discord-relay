@@ -6,14 +6,17 @@ import (
 )
 
 type RelayEvent struct {
-	Type      string `json:"type"`
-	Channel   string `json:"channel,omitempty"`
-	ChannelID string `json:"channel_id,omitempty"`
-	Username  string `json:"username,omitempty"`
-	UserID    string `json:"user_id,omitempty"`
-	Content   string `json:"content,omitempty"`
-	MessageID string `json:"message_id,omitempty"`
-	Timestamp string `json:"timestamp"`
+	Type           string `json:"type"`
+	Channel        string `json:"channel,omitempty"`
+	ChannelID      string `json:"channel_id,omitempty"`
+	Username       string `json:"username,omitempty"`
+	UserID         string `json:"user_id,omitempty"`
+	Content        string `json:"content,omitempty"`
+	MessageID      string `json:"message_id,omitempty"`
+	Timestamp      string `json:"timestamp"`
+	ReplyToID      string `json:"reply_to_id,omitempty"`
+	ReplyToContent string `json:"reply_to_content,omitempty"`
+	ReplyToAuthor  string `json:"reply_to_author,omitempty"`
 }
 
 type User struct {
@@ -41,6 +44,7 @@ type Channel struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
 	GuildID string `json:"guild_id,omitempty"`
+	Type    string `json:"type,omitempty"`
 }
 
 type SendMessageRequest struct {
@@ -48,6 +52,7 @@ type SendMessageRequest struct {
 	Username  string `json:"username"`
 	AvatarURL string `json:"avatar_url,omitempty"`
 	Content   string `json:"content"`
+	ReplyToID string `json:"reply_to_id,omitempty"`
 }
 
 type SetStatusRequest struct {
