@@ -111,7 +111,7 @@ func (s *Server) PostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msgID, err := s.sendMsg(ch, req.Username, req.AvatarURL, terminalAuthoredContent(req.Username, req.Content, req.ReplyToID), req.ReplyToID)
+	msgID, err := s.sendMsg(ch, req.Username, req.AvatarURL, req.Content, req.ReplyToID)
 	if err != nil {
 		slog.Error("failed to send message to discord", "error", err)
 		writeJSON(w, http.StatusInternalServerError, models.APIResponse{OK: false, Error: "failed to send message"})
@@ -195,13 +195,6 @@ func (s *Server) PostFile(w http.ResponseWriter, r *http.Request) {
 		Channel:   channel,
 		Timestamp: models.TimeNow().Format(time.RFC3339),
 	})
-}
-
-func terminalAuthoredContent(username, content, replyToID string) string {
-	if replyToID == "" || username == "" {
-		return content
-	}
-	return fmt.Sprintf("**%s**: %s", username, content)
 }
 
 func (s *Server) GetHistory(w http.ResponseWriter, r *http.Request) {

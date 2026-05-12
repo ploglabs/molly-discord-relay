@@ -75,9 +75,10 @@ func (b *Bot) Session() *discordgo.Session {
 
 func (b *Bot) SendWebhookMessage(channelID, username, avatarURL, content, replyToID string) (string, error) {
 	content = b.resolveMentions(channelID, content)
+
 	if replyToID != "" {
 		msg, err := b.session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-			Content: content,
+			Content: replyContent(username, content),
 			Reference: &discordgo.MessageReference{
 				MessageID: replyToID,
 				ChannelID: channelID,
@@ -101,7 +102,7 @@ func (b *Bot) SendWebhookMessage(channelID, username, avatarURL, content, replyT
 		return msg.ID, nil
 	}
 
-	msg, err := b.session.WebhookExecute(wh.ID, wh.Token, false, &discordgo.WebhookParams{
+	msg, err := b.session.WebhookExecute(wh.ID, wh.Token, true, &discordgo.WebhookParams{
 		Content:   content,
 		Username:  username,
 		AvatarURL: avatarURL,
@@ -130,7 +131,7 @@ func (b *Bot) SendWebhookFile(channelID, username, avatarURL, content, filename 
 		}
 		return msg.ID, nil
 	}
-	msg, err := b.session.WebhookExecute(wh.ID, wh.Token, false, &discordgo.WebhookParams{
+	msg, err := b.session.WebhookExecute(wh.ID, wh.Token, true, &discordgo.WebhookParams{
 		Content:   content,
 		Username:  username,
 		AvatarURL: avatarURL,
@@ -151,6 +152,13 @@ func botAuthoredContent(username, content string) string {
 	}
 	if content == "" {
 		return "**" + username + "**"
+	}
+	return "**" + username + "**: " + content
+}
+
+func replyContent(username, content string) string {
+	if username == "" {
+		return content
 	}
 	return "**" + username + "**: " + content
 }
@@ -238,6 +246,17 @@ func (b *Bot) addHandlers() {
 	b.session.AddHandler(b.onMessageReactionAdd)
 	b.session.AddHandler(b.onMessageReactionRemove)
 	b.session.AddHandler(b.onRateLimit)
+}
+
+func (b *Bot) isOwnWebhook(webhookID string) bool {
+	b.webhookMu.RLock()
+	defer b.webhookMu.RUnlock()
+	for _, wh := range b.webhookCache {
+		if wh.ID == webhookID {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *Bot) onReady(s *discordgo.Session, r *discordgo.Ready) {

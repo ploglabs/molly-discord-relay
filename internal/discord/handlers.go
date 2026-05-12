@@ -12,6 +12,11 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 		return
 	}
 
+	// Suppress messages sent by our own webhooks (avoid echo loop)
+	if m.WebhookID != "" && b.isOwnWebhook(m.WebhookID) {
+		return
+	}
+
 	chName := b.channelName(m.ChannelID)
 	evt := models.RelayEvent{
 		Type:      "message_create",
