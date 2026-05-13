@@ -74,19 +74,74 @@ pkg/
 
 # Installation
 
-## Clone Repository
+### Pre-built packages
+
+Download the latest release from [GitHub Releases](https://github.com/ploglabs/molly-discord-relay/releases).
+
+### Linux — apt (Debian/Ubuntu)
 
 ```bash
-git clone https://github.com/yourusername/molly-relay.git
-cd molly-relay
+curl -LO https://github.com/ploglabs/molly-discord-relay/releases/latest/download/molly-discord-relay_$(curl -s https://api.github.com/repos/ploglabs/molly-discord-relay/releases/latest | grep tag_name | cut -d'"' -f4)_linux_amd64.deb
+sudo dpkg -i molly-discord-relay_*_linux_amd64.deb
 ```
 
----
-
-## Install Dependencies
+### Linux — pacman (Arch)
 
 ```bash
-go mod tidy
+yay -S molly-discord-relay-bin
+```
+
+### Linux — rpm (Fedora/RHEL)
+
+```bash
+curl -LO https://github.com/ploglabs/molly-discord-relay/releases/latest/download/molly-discord-relay_$(curl -s https://api.github.com/repos/ploglabs/molly-discord-relay/releases/latest | grep tag_name | cut -d'"' -f4)_linux_amd64.rpm
+sudo rpm -i molly-discord-relay_*_linux_amd64.rpm
+```
+
+### macOS — Homebrew
+
+```bash
+brew install ploglabs/tap/molly-discord-relay
+```
+
+### Build from source
+
+```bash
+git clone https://github.com/ploglabs/molly-discord-relay.git
+cd molly-discord-relay
+make build
+```
+
+### go install
+
+```bash
+go install github.com/ploglabs/molly-discord-relay/cmd@latest
+```
+
+## Systemd Service (Linux)
+
+After installing, create a systemd service to run the relay automatically:
+
+```bash
+sudo tee /etc/systemd/system/molly-relay.service <<'EOF'
+[Unit]
+Description=Molly Discord Relay Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/molly-relay
+EnvironmentFile=/opt/molly-relay/.env
+ExecStart=/usr/bin/molly-discord-relay
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now molly-relay
 ```
 
 ---

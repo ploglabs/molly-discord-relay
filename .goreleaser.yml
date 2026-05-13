@@ -1,0 +1,116 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: molly-discord-relay
+    main: ./cmd
+    binary: molly-discord-relay
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - id: molly-discord-relay
+    builds:
+      - molly-discord-relay
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    files:
+      - .env.example
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  name_template: "{{ .Tag }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+
+release:
+  github:
+    owner: ploglabs
+    name: molly-discord-relay
+
+brews:
+  - id: molly-discord-relay
+    repository:
+      owner: ploglabs
+      name: homebrew-tap
+    directory: Formula
+    homepage: "https://github.com/ploglabs/molly-discord-relay"
+    description: "Discord relay server for terminal-native realtime chat"
+    license: MIT
+    install: |
+      bin.install "molly-discord-relay"
+
+nfpms:
+  - id: molly-discord-relay
+    package_name: molly-discord-relay
+    file_name_template: >-
+      {{ .PackageName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    homepage: https://github.com/ploglabs/molly-discord-relay
+    description: >
+      Discord relay backend for terminal-native developer collaboration.
+      Bridges Discord to terminal clients via WebSockets and REST APIs
+      with realtime presence tracking and SQLite persistence.
+    license: MIT
+    formats:
+      - deb
+      - rpm
+      - apk
+      - archlinux
+    maintainer: "ploglabs <hello@ploglabs.dev>"
+    section: net
+    contents:
+      - src: .env.example
+        dst: /etc/molly-discord-relay/.env.example
+
+scoops:
+  - id: molly-discord-relay
+    name: molly-discord-relay
+    repository:
+      owner: ploglabs
+      name: scoop-bucket
+    homepage: https://github.com/ploglabs/molly-discord-relay
+    description: "Discord relay server for terminal-native realtime chat"
+    license: MIT
+
+aurs:
+  - id: molly-discord-relay
+    name: molly-discord-relay-bin
+    homepage: https://github.com/ploglabs/molly-discord-relay
+    description: "Discord relay server for terminal-native realtime chat"
+    license: MIT
+    maintainers:
+      - "ploglabs <hello@ploglabs.dev>"
+    repository:
+      owner: ploglabs
+      name: aur
+    private_key: "{{ .Env.AUR_KEY }}"
+    git_url: "ssh://aur@aur.archlinux.org/molly-discord-relay-bin.git"
+    commit_author:
+      name: ploglabs
+      email: hello@ploglabs.dev
