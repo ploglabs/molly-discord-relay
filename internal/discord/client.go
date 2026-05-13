@@ -20,6 +20,7 @@ type webhookEntry struct {
 }
 
 var mentionPattern = regexp.MustCompile(`(^|[\s(])@([A-Za-z0-9_.-]{2,32})`)
+var discordMentionRe = regexp.MustCompile(`<@!?(\d+)>`)
 
 type Bot struct {
 	session      *discordgo.Session
@@ -195,6 +196,27 @@ func (b *Bot) resolveMentions(channelID, content string) string {
 			return match
 		}
 		return prefix + "<@" + user.ID + ">"
+	})
+}
+
+func (b *Bot) resolveIncomingMentions(content string, mentions []*discordgo.User) string {
+	if !strings.Contains(content, "<@") {
+		return content
+	}
+	return discordMentionRe.ReplaceAllStringFunc(content, func(match string) string {
+		id := match[2 : len(match)-1]
+		if id[0] == '!' {
+			id = id[1:]
+		}
+		for _, u := range mentions {
+			if u.ID == id {
+				return "@" + u.Username
+			}
+		}
+		if u, err := b.session.User(id); err == nil && u != nil {
+			return "@" + u.Username
+		}
+		return match
 	})
 }
 

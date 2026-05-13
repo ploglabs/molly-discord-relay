@@ -17,6 +17,8 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 		return
 	}
 
+	content := b.resolveIncomingMentions(m.Content, m.Mentions)
+
 	chName := b.channelName(m.ChannelID)
 	evt := models.RelayEvent{
 		Type:      "message_create",
@@ -24,27 +26,45 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 		ChannelID: m.ChannelID,
 		Username:  m.Author.Username,
 		UserID:    m.Author.ID,
-		Content:   m.Content,
+		Content:   content,
 		MessageID: m.ID,
 		Timestamp: m.Timestamp.Format(time.RFC3339),
 	}
 
 	if m.ReferencedMessage != nil {
 		evt.ReplyToID = m.ReferencedMessage.ID
-		evt.ReplyToContent = m.ReferencedMessage.Content
+		evt.ReplyToContent = b.resolveIncomingMentions(m.ReferencedMessage.Content, m.ReferencedMessage.Mentions)
 		if m.ReferencedMessage.Author != nil {
 			evt.ReplyToAuthor = m.ReferencedMessage.Author.Username
 		}
 	}
+
+	evt.Attachments = discordAttachmentsToModel(m.Attachments)
 
 	b.broadcast(evt)
 	_ = b.store.InsertMessage(models.Message{
 		ID:        m.ID,
 		ChannelID: m.ChannelID,
 		Author:    m.Author.Username,
-		Content:   m.Content,
+		Content:   content,
 		Timestamp: m.Timestamp,
 	})
+}
+
+func discordAttachmentsToModel(attachments []*discordgo.MessageAttachment) []models.Attachment {
+	result := make([]models.Attachment, 0, len(attachments))
+	for _, a := range attachments {
+		result = append(result, models.Attachment{
+			URL:         a.URL,
+			ProxyURL:    a.ProxyURL,
+			Filename:    a.Filename,
+			ContentType: a.ContentType,
+			Width:       a.Width,
+			Height:      a.Height,
+			Size:        a.Size,
+		})
+	}
+	return result
 }
 
 func (b *Bot) onMessageUpdate(s *discordgo.Session, m *discordgo.MessageUpdate) {
@@ -52,12 +72,14 @@ func (b *Bot) onMessageUpdate(s *discordgo.Session, m *discordgo.MessageUpdate) 
 		return
 	}
 
+	content := b.resolveIncomingMentions(m.Content, m.Mentions)
+
 	chName := b.channelName(m.ChannelID)
 	evt := models.RelayEvent{
 		Type:      "message_update",
 		Channel:   chName,
 		ChannelID: m.ChannelID,
-		Content:   m.Content,
+		Content:   content,
 		MessageID: m.ID,
 		Timestamp: time.Now().Format(time.RFC3339),
 	}
@@ -71,7 +93,7 @@ func (b *Bot) onMessageUpdate(s *discordgo.Session, m *discordgo.MessageUpdate) 
 	if m.Author != nil {
 		_ = b.store.UpdateMessage(models.Message{
 			ID:      m.ID,
-			Content: m.Content,
+			Content: content,
 			Author:  m.Author.Username,
 		})
 	}

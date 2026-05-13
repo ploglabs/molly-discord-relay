@@ -5,18 +5,29 @@ import (
 	"time"
 )
 
+type Attachment struct {
+	URL         string `json:"url"`
+	ProxyURL    string `json:"proxy_url,omitempty"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type,omitempty"`
+	Width       int    `json:"width,omitempty"`
+	Height      int    `json:"height,omitempty"`
+	Size        int    `json:"size,omitempty"`
+}
+
 type RelayEvent struct {
-	Type           string `json:"type"`
-	Channel        string `json:"channel,omitempty"`
-	ChannelID      string `json:"channel_id,omitempty"`
-	Username       string `json:"username,omitempty"`
-	UserID         string `json:"user_id,omitempty"`
-	Content        string `json:"content,omitempty"`
-	MessageID      string `json:"message_id,omitempty"`
-	Timestamp      string `json:"timestamp"`
-	ReplyToID      string `json:"reply_to_id,omitempty"`
-	ReplyToContent string `json:"reply_to_content,omitempty"`
-	ReplyToAuthor  string `json:"reply_to_author,omitempty"`
+	Type           string       `json:"type"`
+	Channel        string       `json:"channel,omitempty"`
+	ChannelID      string       `json:"channel_id,omitempty"`
+	Username       string       `json:"username,omitempty"`
+	UserID         string       `json:"user_id,omitempty"`
+	Content        string       `json:"content,omitempty"`
+	MessageID      string       `json:"message_id,omitempty"`
+	Timestamp      string       `json:"timestamp"`
+	ReplyToID      string       `json:"reply_to_id,omitempty"`
+	ReplyToContent string       `json:"reply_to_content,omitempty"`
+	ReplyToAuthor  string       `json:"reply_to_author,omitempty"`
+	Attachments    []Attachment `json:"attachments,omitempty"`
 }
 
 type User struct {
