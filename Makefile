@@ -27,7 +27,7 @@ vet:
 	$(GO) vet ./...
 
 fmt:
-	$(GO)fmt -w .
+	$(GO) fmt ./...
 
 check: vet test
 
