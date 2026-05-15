@@ -178,22 +178,21 @@ func (s *Store) GetMessages(channelID string, limit int, before, after string) (
 	}
 
 	var query string
-	var args []interface{}
-
-	args = append(args, channelID, limit)
+	args := []interface{}{channelID}
 
 	switch {
 	case before != "" && after != "":
 		query = "SELECT id, channel_id, author, content, timestamp FROM messages WHERE channel_id = ? AND timestamp > (SELECT timestamp FROM messages WHERE id = ?) AND timestamp < (SELECT timestamp FROM messages WHERE id = ?) ORDER BY timestamp DESC LIMIT ?"
-		args = append(args, after, before)
+		args = append(args, after, before, limit)
 	case before != "":
 		query = "SELECT id, channel_id, author, content, timestamp FROM messages WHERE channel_id = ? AND timestamp < (SELECT timestamp FROM messages WHERE id = ?) ORDER BY timestamp DESC LIMIT ?"
-		args = append(args, before)
+		args = append(args, before, limit)
 	case after != "":
 		query = "SELECT id, channel_id, author, content, timestamp FROM messages WHERE channel_id = ? AND timestamp > (SELECT timestamp FROM messages WHERE id = ?) ORDER BY timestamp ASC LIMIT ?"
-		args = append(args, after)
+		args = append(args, after, limit)
 	default:
 		query = "SELECT id, channel_id, author, content, timestamp FROM messages WHERE channel_id = ? ORDER BY timestamp DESC LIMIT ?"
+		args = append(args, limit)
 	}
 
 	rows, err := s.db.Query(query, args...)
