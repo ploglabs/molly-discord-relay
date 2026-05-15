@@ -57,12 +57,30 @@ func (b *Bot) Connect() error {
 		discordgo.IntentsGuildPresences |
 		discordgo.IntentsGuildMessageTyping
 
+	b.loadWebhookCache()
+
 	if err := b.session.Open(); err != nil {
 		return err
 	}
 
 	slog.Info("discord gateway connected")
 	return nil
+}
+
+func (b *Bot) loadWebhookCache() {
+	webhooks, err := b.store.LoadAllWebhooks()
+	if err != nil {
+		slog.Warn("failed to load webhook cache from db", "error", err)
+		return
+	}
+	b.webhookMu.Lock()
+	for channelID, pair := range webhooks {
+		b.webhookCache[channelID] = webhookEntry{ID: pair[0], Token: pair[1]}
+	}
+	b.webhookMu.Unlock()
+	if len(webhooks) > 0 {
+		slog.Info("loaded webhook cache from db", "count", len(webhooks))
+	}
 }
 
 func (b *Bot) Disconnect() error {
@@ -109,6 +127,17 @@ func (b *Bot) SendWebhookMessage(channelID, username, avatarURL, content, replyT
 		AvatarURL: avatarURL,
 	})
 	if err != nil {
+		// Webhook may have been deleted externally — purge and retry once.
+		b.invalidateWebhook(channelID)
+		if wh2, err2 := b.getOrCreateWebhook(channelID); err2 == nil {
+			if msg2, err3 := b.session.WebhookExecute(wh2.ID, wh2.Token, true, &discordgo.WebhookParams{
+				Content:   content,
+				Username:  username,
+				AvatarURL: avatarURL,
+			}); err3 == nil {
+				return msg2.ID, nil
+			}
+		}
 		return "", err
 	}
 
@@ -145,6 +174,13 @@ func (b *Bot) SendWebhookFile(channelID, username, avatarURL, content, filename 
 		return "", err
 	}
 	return msg.ID, nil
+}
+
+func (b *Bot) invalidateWebhook(channelID string) {
+	b.webhookMu.Lock()
+	delete(b.webhookCache, channelID)
+	b.webhookMu.Unlock()
+	_ = b.store.DeleteWebhook(channelID)
 }
 
 func botAuthoredContent(username, content string) string {
@@ -231,20 +267,20 @@ func (b *Bot) getOrCreateWebhook(channelID string) (webhookEntry, error) {
 	b.webhookMu.Lock()
 	defer b.webhookMu.Unlock()
 
-	webhooks, err := b.session.ChannelWebhooks(channelID)
-	if err != nil {
-		slog.Warn("failed to list channel webhooks", "channel_id", channelID, "error", err)
-		return webhookEntry{}, err
+	// Re-check after acquiring write lock (fixes double-checked locking race).
+	if wh, ok := b.webhookCache[channelID]; ok {
+		return wh, nil
 	}
 
-	for _, wh := range webhooks {
-		if wh.User != nil && wh.User.ID == b.session.State.User.ID {
-			entry := webhookEntry{ID: wh.ID, Token: wh.Token}
-			b.webhookCache[channelID] = entry
-			return entry, nil
-		}
+	// Check DB for a token persisted from a previous run.
+	if whID, whToken, err := b.store.GetWebhook(channelID); err == nil {
+		entry := webhookEntry{ID: whID, Token: whToken}
+		b.webhookCache[channelID] = entry
+		return entry, nil
 	}
 
+	// Create a new webhook — WebhookCreate is the only Discord API call that
+	// returns a token. ChannelWebhooks intentionally omits tokens for security.
 	wh, err := b.session.WebhookCreate(channelID, "molly-relay", "")
 	if err != nil {
 		slog.Warn("failed to create webhook", "channel_id", channelID, "error", err)
@@ -253,6 +289,9 @@ func (b *Bot) getOrCreateWebhook(channelID string) (webhookEntry, error) {
 
 	entry := webhookEntry{ID: wh.ID, Token: wh.Token}
 	b.webhookCache[channelID] = entry
+	if saveErr := b.store.SaveWebhook(channelID, entry.ID, entry.Token); saveErr != nil {
+		slog.Warn("failed to persist webhook token", "channel_id", channelID, "error", saveErr)
+	}
 	slog.Info("created webhook", "channel_id", channelID, "webhook_id", wh.ID)
 	return entry, nil
 }
