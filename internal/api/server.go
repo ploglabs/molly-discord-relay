@@ -63,6 +63,12 @@ func (s *Server) SecurityMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "X-API-Key, Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, 25<<20)
 		next.ServeHTTP(w, r)
 	})
@@ -130,7 +136,7 @@ func (s *Server) PostMessage(w http.ResponseWriter, r *http.Request) {
 		OK:        true,
 		MessageID: msgID,
 		Channel:   req.Channel,
-		Timestamp: models.TimeNow().Format("2006-01-02T15:04:05Z"),
+		Timestamp: models.TimeNow().Format(time.RFC3339),
 	})
 }
 
@@ -154,6 +160,10 @@ func (s *Server) PostFile(w http.ResponseWriter, r *http.Request) {
 	content := strings.TrimSpace(strings.ReplaceAll(r.FormValue("content"), "\x00", ""))
 	if channel == "" || username == "" {
 		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "channel and username are required"})
+		return
+	}
+	if len(content) > 2000 {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "content exceeds 2000 characters"})
 		return
 	}
 
@@ -406,8 +416,7 @@ func (s *Server) GetChannelMessages(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) resolveChannel(nameOrID string) (string, error) {
@@ -431,5 +440,7 @@ func (s *Server) resolveChannel(nameOrID string) (string, error) {
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.Error("failed to encode JSON response", "error", err)
+	}
 }

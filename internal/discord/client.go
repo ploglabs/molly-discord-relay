@@ -31,6 +31,7 @@ type Bot struct {
 }
 
 func New(token string, store *storage.Store, hub *websocket.Hub) (*Bot, error) {
+	token = strings.TrimPrefix(token, "Bot ")
 	s, err := discordgo.New("Bot " + token)
 	if err != nil {
 		return nil, err
