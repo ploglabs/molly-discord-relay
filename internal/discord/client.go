@@ -52,6 +52,7 @@ func (b *Bot) Connect() error {
 	slog.Info("connecting to discord gateway")
 
 	b.session.Identify.Intents = discordgo.IntentsGuildMessages |
+		discordgo.IntentMessageContent |
 		discordgo.IntentsGuildMembers |
 		discordgo.IntentsGuildMessageReactions |
 		discordgo.IntentsGuildPresences |
