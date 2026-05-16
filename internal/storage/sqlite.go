@@ -76,6 +76,11 @@ func (s *Store) migrate() error {
 		guild_id TEXT,
 		type TEXT NOT NULL DEFAULT 'text'
 	);
+	CREATE TABLE IF NOT EXISTS webhooks (
+		channel_id   TEXT PRIMARY KEY,
+		webhook_id   TEXT NOT NULL,
+		webhook_token TEXT NOT NULL
+	);
 	CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, timestamp);
 	CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
 	`
@@ -386,4 +391,58 @@ func (s *Store) GetChannelByID(id string) (*models.Channel, error) {
 		return nil, err
 	}
 	return &c, nil
+}
+
+// SaveWebhook persists a webhook token so it survives restarts.
+func (s *Store) SaveWebhook(channelID, webhookID, webhookToken string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(
+		"INSERT OR REPLACE INTO webhooks (channel_id, webhook_id, webhook_token) VALUES (?, ?, ?)",
+		channelID, webhookID, webhookToken,
+	)
+	return err
+}
+
+// GetWebhook returns the stored webhook entry for a channel, if any.
+func (s *Store) GetWebhook(channelID string) (id, token string, err error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	err = s.db.QueryRow(
+		"SELECT webhook_id, webhook_token FROM webhooks WHERE channel_id = ?", channelID,
+	).Scan(&id, &token)
+	return
+}
+
+// DeleteWebhook removes a stored webhook (called when Discord reports it no longer exists).
+func (s *Store) DeleteWebhook(channelID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec("DELETE FROM webhooks WHERE channel_id = ?", channelID)
+	return err
+}
+
+// LoadAllWebhooks returns all persisted channel→(id,token) pairs for cache preload.
+func (s *Store) LoadAllWebhooks() (map[string][2]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query("SELECT channel_id, webhook_id, webhook_token FROM webhooks")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string][2]string)
+	for rows.Next() {
+		var channelID, webhookID, webhookToken string
+		if err := rows.Scan(&channelID, &webhookID, &webhookToken); err != nil {
+			return nil, err
+		}
+		out[channelID] = [2]string{webhookID, webhookToken}
+	}
+	return out, rows.Err()
 }
