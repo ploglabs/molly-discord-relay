@@ -6,7 +6,6 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 type Hub struct {
@@ -55,19 +54,26 @@ func (h *Hub) Run() {
 
 		case message := <-h.broadcast:
 			h.mu.RLock()
+			var slow []*Client
 			for client := range h.clients {
 				select {
 				case client.send <- message:
 				default:
-					h.mu.RUnlock()
-					h.mu.Lock()
-					close(client.send)
-					delete(h.clients, client)
-					h.mu.Unlock()
-					h.mu.RLock()
+					slow = append(slow, client)
 				}
 			}
 			h.mu.RUnlock()
+			if len(slow) > 0 {
+				h.mu.Lock()
+				for _, client := range slow {
+					if _, ok := h.clients[client]; ok {
+						close(client.send)
+						delete(h.clients, client)
+						h.clientCount.Add(-1)
+					}
+				}
+				h.mu.Unlock()
+			}
 		}
 	}
 }
@@ -151,11 +157,5 @@ func (h *Hub) Shutdown() {
 	for client := range h.clients {
 		close(client.send)
 		delete(h.clients, client)
-	}
-
-	select {
-	case <-time.After(time.Second * 5):
-		slog.Warn("hub shutdown timeout")
-	default:
 	}
 }
