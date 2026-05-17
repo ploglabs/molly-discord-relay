@@ -20,11 +20,17 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 	content := b.resolveIncomingMentions(m.Content, m.Mentions)
 
 	chName := b.channelName(m.ChannelID)
+	// Prefer GlobalName (display name) over raw Username to match how the
+	// terminal client identifies itself (cfg.General.Username = GlobalName).
+	displayName := m.Author.GlobalName
+	if displayName == "" {
+		displayName = m.Author.Username
+	}
 	evt := models.RelayEvent{
 		Type:      "message_create",
 		Channel:   chName,
 		ChannelID: m.ChannelID,
-		Username:  m.Author.Username,
+		Username:  displayName,
 		UserID:    m.Author.ID,
 		Content:   content,
 		MessageID: m.ID,
@@ -35,7 +41,11 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 		evt.ReplyToID = m.ReferencedMessage.ID
 		evt.ReplyToContent = b.resolveIncomingMentions(m.ReferencedMessage.Content, m.ReferencedMessage.Mentions)
 		if m.ReferencedMessage.Author != nil {
-			evt.ReplyToAuthor = m.ReferencedMessage.Author.Username
+			replyAuthor := m.ReferencedMessage.Author.GlobalName
+			if replyAuthor == "" {
+				replyAuthor = m.ReferencedMessage.Author.Username
+			}
+			evt.ReplyToAuthor = replyAuthor
 		}
 	}
 
