@@ -1,7 +1,10 @@
 .env
 *.db
+*.db-shm
+*.db-wal
 bin/
 *.exe
 *.dll
 *.so
 *.dylib
+molly-discord-relay

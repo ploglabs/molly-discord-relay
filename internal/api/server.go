@@ -124,19 +124,37 @@ func (s *Server) PostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	now := models.TimeNow()
 	_ = s.store.InsertMessage(models.Message{
 		ID:        msgID,
 		ChannelID: ch,
 		Author:    req.Username,
 		Content:   req.Content,
-		Timestamp: models.TimeNow(),
+		Timestamp: now,
 	})
+
+	// Broadcast to all WebSocket clients so other terminal users see it in real-time.
+	// The Discord gateway echo for this webhook message is suppressed by isOwnWebhook,
+	// so without this broadcast other terminal users would never receive the message.
+	evt := models.RelayEvent{
+		Type:      "message_create",
+		Channel:   req.Channel,
+		ChannelID: ch,
+		Username:  req.Username,
+		Content:   req.Content,
+		MessageID: msgID,
+		Timestamp: now.Format(time.RFC3339),
+		ReplyToID: req.ReplyToID,
+	}
+	if data, err := json.Marshal(evt); err == nil {
+		s.hub.Broadcast(data)
+	}
 
 	writeJSON(w, http.StatusOK, models.MessageResponse{
 		OK:        true,
 		MessageID: msgID,
 		Channel:   req.Channel,
-		Timestamp: models.TimeNow().Format(time.RFC3339),
+		Timestamp: now.Format(time.RFC3339),
 	})
 }
 
