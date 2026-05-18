@@ -391,18 +391,36 @@ func (s *Server) GetChannelMessages(w http.ResponseWriter, r *http.Request) {
 		limit = parsed
 	}
 
-	var before *time.Time
-	if v := r.URL.Query().Get("before"); v != "" {
+	parseTimestamp := func(v string) (*time.Time, bool) {
 		t, err := time.Parse(time.RFC3339Nano, v)
 		if err != nil {
 			t2, err2 := time.Parse(time.RFC3339, v)
 			if err2 != nil {
-				writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "invalid before timestamp"})
-				return
+				return nil, false
 			}
 			t = t2
 		}
-		before = &t
+		return &t, true
+	}
+
+	var before *time.Time
+	if v := r.URL.Query().Get("before"); v != "" {
+		t, ok := parseTimestamp(v)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "invalid before timestamp"})
+			return
+		}
+		before = t
+	}
+
+	var since *time.Time
+	if v := r.URL.Query().Get("since"); v != "" {
+		t, ok := parseTimestamp(v)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "invalid since timestamp"})
+			return
+		}
+		since = t
 	}
 
 	chID, err := s.resolveChannel(channel)
@@ -416,7 +434,7 @@ func (s *Server) GetChannelMessages(w http.ResponseWriter, r *http.Request) {
 		chName = ch.Name
 	}
 
-	messages, err := s.store.GetMessagesByChannelTimestamp(chID, limit, before)
+	messages, err := s.store.GetMessagesByChannelTimestamp(chID, limit, before, since)
 	if err != nil {
 		slog.Error("failed to fetch channel messages", "error", err)
 		writeJSON(w, http.StatusInternalServerError, models.APIResponse{OK: false, Error: "internal error"})

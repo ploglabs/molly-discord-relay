@@ -134,3 +134,67 @@ func TestReplaceChannels_ReplacesSnapshot(t *testing.T) {
 		t.Fatal("expected stale text channel to be removed")
 	}
 }
+
+// Bug 4 regression: GetMessagesByChannelTimestamp with since must return only
+// messages strictly after the given timestamp.
+func TestGetMessagesByChannelTimestamp_Since(t *testing.T) {
+	s := newTestStore(t)
+	base := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	msgs := []models.Message{
+		{ID: "1", ChannelID: "c1", Author: "alice", Content: "old", Timestamp: base},
+		{ID: "2", ChannelID: "c1", Author: "alice", Content: "boundary", Timestamp: base.Add(time.Minute)},
+		{ID: "3", ChannelID: "c1", Author: "alice", Content: "new1", Timestamp: base.Add(2 * time.Minute)},
+		{ID: "4", ChannelID: "c1", Author: "alice", Content: "new2", Timestamp: base.Add(3 * time.Minute)},
+	}
+	for _, m := range msgs {
+		if err := s.InsertMessage(m); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+
+	since := base.Add(time.Minute) // exclusive: should return "3" and "4" only
+	got, err := s.GetMessagesByChannelTimestamp("c1", 100, nil, &since)
+	if err != nil {
+		t.Fatalf("GetMessagesByChannelTimestamp: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 messages after since, got %d: %#v", len(got), got)
+	}
+	for _, m := range got {
+		if m.ID == "1" || m.ID == "2" {
+			t.Errorf("message %s should be excluded by since filter", m.ID)
+		}
+	}
+}
+
+func TestGetMessagesByChannelTimestamp_BeforeAndSince(t *testing.T) {
+	s := newTestStore(t)
+	base := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	msgs := []models.Message{
+		{ID: "1", ChannelID: "c1", Author: "alice", Content: "a", Timestamp: base},
+		{ID: "2", ChannelID: "c1", Author: "alice", Content: "b", Timestamp: base.Add(time.Minute)},
+		{ID: "3", ChannelID: "c1", Author: "alice", Content: "c", Timestamp: base.Add(2 * time.Minute)},
+		{ID: "4", ChannelID: "c1", Author: "alice", Content: "d", Timestamp: base.Add(3 * time.Minute)},
+	}
+	for _, m := range msgs {
+		if err := s.InsertMessage(m); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+
+	since := base                       // after base (exclusive)
+	before := base.Add(3 * time.Minute) // before T+3 (exclusive)
+	// Should return only "2" and "3"
+	got, err := s.GetMessagesByChannelTimestamp("c1", 100, &before, &since)
+	if err != nil {
+		t.Fatalf("GetMessagesByChannelTimestamp: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 messages in range, got %d: %#v", len(got), got)
+	}
+	for _, m := range got {
+		if m.ID != "2" && m.ID != "3" {
+			t.Errorf("unexpected message %s in range result", m.ID)
+		}
+	}
+}

@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"log/slog"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -14,7 +15,11 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 
 	// Suppress messages sent by our own webhooks (avoid echo loop)
 	if m.WebhookID != "" && b.isOwnWebhook(m.WebhookID) {
+		slog.Debug("suppressed own webhook echo", "webhook_id", m.WebhookID)
 		return
+	}
+	if m.WebhookID != "" {
+		slog.Warn("webhook message not in cache — broadcasting gateway echo (may cause duplication)", "webhook_id", m.WebhookID)
 	}
 
 	content := b.resolveIncomingMentions(m.Content, m.Mentions)

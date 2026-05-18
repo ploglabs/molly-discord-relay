@@ -217,7 +217,7 @@ func (s *Store) GetMessages(channelID string, limit int, before, after string) (
 	return messages, rows.Err()
 }
 
-func (s *Store) GetMessagesByChannelTimestamp(channelID string, limit int, before *time.Time) ([]models.Message, error) {
+func (s *Store) GetMessagesByChannelTimestamp(channelID string, limit int, before, since *time.Time) ([]models.Message, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -227,12 +227,23 @@ func (s *Store) GetMessagesByChannelTimestamp(channelID string, limit int, befor
 
 	var rows *sql.Rows
 	var err error
-	if before != nil {
+	switch {
+	case before != nil && since != nil:
+		rows, err = s.db.Query(
+			"SELECT id, channel_id, author, content, timestamp FROM messages WHERE channel_id = ? AND timestamp < ? AND timestamp > ? ORDER BY timestamp DESC LIMIT ?",
+			channelID, before.UTC(), since.UTC(), limit,
+		)
+	case before != nil:
 		rows, err = s.db.Query(
 			"SELECT id, channel_id, author, content, timestamp FROM messages WHERE channel_id = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT ?",
 			channelID, before.UTC(), limit,
 		)
-	} else {
+	case since != nil:
+		rows, err = s.db.Query(
+			"SELECT id, channel_id, author, content, timestamp FROM messages WHERE channel_id = ? AND timestamp > ? ORDER BY timestamp DESC LIMIT ?",
+			channelID, since.UTC(), limit,
+		)
+	default:
 		rows, err = s.db.Query(
 			"SELECT id, channel_id, author, content, timestamp FROM messages WHERE channel_id = ? ORDER BY timestamp DESC LIMIT ?",
 			channelID, limit,
