@@ -346,6 +346,35 @@ func (s *Store) UpsertChannel(c models.Channel) error {
 	return err
 }
 
+func (s *Store) ReplaceChannels(channels []models.Channel) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM channels"); err != nil {
+		return err
+	}
+
+	for _, c := range channels {
+		if c.Type == "" {
+			c.Type = "text"
+		}
+		if _, err := tx.Exec(
+			"INSERT INTO channels (id, name, guild_id, type) VALUES (?, ?, ?, ?)",
+			c.ID, c.Name, c.GuildID, c.Type,
+		); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
 func (s *Store) GetChannels() ([]models.Channel, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

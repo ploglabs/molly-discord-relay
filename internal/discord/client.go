@@ -325,6 +325,7 @@ func (b *Bot) isOwnWebhook(webhookID string) bool {
 func (b *Bot) onReady(s *discordgo.Session, r *discordgo.Ready) {
 	slog.Info("discord ready", "guilds", len(r.Guilds), "user", r.User.String())
 
+	var synced []models.Channel
 	for _, g := range r.Guilds {
 		channels, err := s.GuildChannels(g.ID)
 		if err != nil {
@@ -332,17 +333,20 @@ func (b *Bot) onReady(s *discordgo.Session, r *discordgo.Ready) {
 			continue
 		}
 		for _, ch := range channels {
-			chType := "voice"
-			if ch.Type == discordgo.ChannelTypeGuildText || ch.Type == discordgo.ChannelTypeGuildNews {
-				chType = "text"
+			if ch.Type != discordgo.ChannelTypeGuildText && ch.Type != discordgo.ChannelTypeGuildNews {
+				continue
 			}
-			_ = b.store.UpsertChannel(models.Channel{
+			synced = append(synced, models.Channel{
 				ID:      ch.ID,
 				Name:    ch.Name,
 				GuildID: ch.GuildID,
-				Type:    chType,
+				Type:    "text",
 			})
 		}
+	}
+
+	if err := b.store.ReplaceChannels(synced); err != nil {
+		slog.Warn("failed to sync channel snapshot", "error", err)
 	}
 }
 
