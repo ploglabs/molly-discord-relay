@@ -101,3 +101,36 @@ func TestGetMessages_ArgOrdering(t *testing.T) {
 		}
 	})
 }
+
+func TestReplaceChannels_ReplacesSnapshot(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.UpsertChannel(models.Channel{ID: "voice-1", Name: "General Voice", GuildID: "g1", Type: "voice"}); err != nil {
+		t.Fatalf("UpsertChannel voice: %v", err)
+	}
+	if err := s.UpsertChannel(models.Channel{ID: "text-old", Name: "old", GuildID: "g1", Type: "text"}); err != nil {
+		t.Fatalf("UpsertChannel old text: %v", err)
+	}
+
+	err := s.ReplaceChannels([]models.Channel{
+		{ID: "text-1", Name: "general", GuildID: "g1", Type: "text"},
+		{ID: "text-2", Name: "dev", GuildID: "g1", Type: "text"},
+	})
+	if err != nil {
+		t.Fatalf("ReplaceChannels: %v", err)
+	}
+
+	channels, err := s.GetChannels()
+	if err != nil {
+		t.Fatalf("GetChannels: %v", err)
+	}
+	if len(channels) != 2 {
+		t.Fatalf("expected 2 text channels, got %d", len(channels))
+	}
+	if channels[0].Name != "dev" || channels[1].Name != "general" {
+		t.Fatalf("unexpected channels after replace: %#v", channels)
+	}
+	if _, err := s.GetChannelByName("old"); err == nil {
+		t.Fatal("expected stale text channel to be removed")
+	}
+}
