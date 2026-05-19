@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
@@ -47,48 +48,76 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+const currentSchemaVersion = 2
+
 func (s *Store) migrate() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	schema := `
-	CREATE TABLE IF NOT EXISTS users (
-		id TEXT PRIMARY KEY,
-		username TEXT NOT NULL,
-		online INTEGER DEFAULT 0,
-		last_seen DATETIME
-	);
-	CREATE TABLE IF NOT EXISTS messages (
-		id TEXT PRIMARY KEY,
-		channel_id TEXT NOT NULL,
-		author TEXT NOT NULL,
-		content TEXT NOT NULL,
-		timestamp DATETIME NOT NULL
-	);
-	CREATE TABLE IF NOT EXISTS statuses (
-		user_id TEXT PRIMARY KEY,
-		status TEXT NOT NULL,
-		updated_at DATETIME NOT NULL
-	);
-	CREATE TABLE IF NOT EXISTS channels (
-		id TEXT PRIMARY KEY,
-		name TEXT NOT NULL,
-		guild_id TEXT,
-		type TEXT NOT NULL DEFAULT 'text'
-	);
-	CREATE TABLE IF NOT EXISTS webhooks (
-		channel_id   TEXT PRIMARY KEY,
-		webhook_id   TEXT NOT NULL,
-		webhook_token TEXT NOT NULL
-	);
-	CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, timestamp);
-	CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
-	`
-
-	if _, err := s.db.Exec(schema); err != nil {
-		return err
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`); err != nil {
+		return fmt.Errorf("create _meta table: %w", err)
 	}
-	_, _ = s.db.Exec("ALTER TABLE channels ADD COLUMN type TEXT NOT NULL DEFAULT 'text'")
+
+	var version int
+	var versionStr string
+	if err := s.db.QueryRow("SELECT value FROM _meta WHERE key = 'schema_version'").Scan(&versionStr); err == nil {
+		version, _ = strconv.Atoi(versionStr)
+	}
+
+	if version < 1 {
+		schema := `
+		CREATE TABLE IF NOT EXISTS users (
+			id TEXT PRIMARY KEY,
+			username TEXT NOT NULL,
+			online INTEGER DEFAULT 0,
+			last_seen DATETIME
+		);
+		CREATE TABLE IF NOT EXISTS messages (
+			id TEXT PRIMARY KEY,
+			channel_id TEXT NOT NULL,
+			author TEXT NOT NULL,
+			content TEXT NOT NULL,
+			timestamp DATETIME NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS statuses (
+			user_id TEXT PRIMARY KEY,
+			status TEXT NOT NULL,
+			updated_at DATETIME NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS channels (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			guild_id TEXT,
+			type TEXT NOT NULL DEFAULT 'text'
+		);
+		CREATE TABLE IF NOT EXISTS webhooks (
+			channel_id   TEXT PRIMARY KEY,
+			webhook_id   TEXT NOT NULL,
+			webhook_token TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, timestamp);
+		CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
+		`
+		if _, err := s.db.Exec(schema); err != nil {
+			return fmt.Errorf("run v1 migration: %w", err)
+		}
+		version = 1
+	}
+
+	if version < 2 {
+		if _, err := s.db.Exec("SELECT type FROM channels LIMIT 1"); err != nil {
+			if _, err := s.db.Exec("ALTER TABLE channels ADD COLUMN type TEXT NOT NULL DEFAULT 'text'"); err != nil {
+				return fmt.Errorf("add channels.type column: %w", err)
+			}
+			slog.Info("added type column to channels table")
+		}
+		version = 2
+	}
+
+	_, err := s.db.Exec("INSERT OR REPLACE INTO _meta (key, value) VALUES ('schema_version', ?)", strconv.Itoa(version))
+	if err != nil {
+		return fmt.Errorf("persist schema version: %w", err)
+	}
 	return nil
 }
 
