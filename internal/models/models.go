@@ -58,8 +58,21 @@ type Channel struct {
 	Type    string `json:"type,omitempty"`
 }
 
+type Guild struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type BotCheckResponse struct {
+	OK       bool   `json:"ok"`
+	BotInGuild bool `json:"bot_in_guild"`
+	GuildID  string `json:"guild_id,omitempty"`
+	Message  string `json:"message,omitempty"`
+}
+
 type SendMessageRequest struct {
 	Channel   string `json:"channel"`
+	GuildID   string `json:"guild_id,omitempty"`
 	Username  string `json:"username"`
 	AvatarURL string `json:"avatar_url,omitempty"`
 	Content   string `json:"content"`

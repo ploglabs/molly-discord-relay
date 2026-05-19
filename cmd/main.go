@@ -63,7 +63,7 @@ func main() {
 
 	tracker := presence.NewTracker(store, hub)
 
-	resolveChannel := func(nameOrID string) (string, error) {
+	resolveChannel := func(nameOrID string, guildID string) (string, error) {
 		ch, err := bot.Session().Channel(nameOrID)
 		if err == nil && ch != nil {
 			if ch.Type == discordgo.ChannelTypeGuildText || ch.Type == discordgo.ChannelTypeGuildNews {
@@ -71,6 +71,19 @@ func main() {
 				return ch.ID, nil
 			}
 			return "", fmt.Errorf("channel not found: %s", nameOrID)
+		}
+
+		if guildID != "" {
+			channels, err := bot.Session().GuildChannels(guildID)
+			if err == nil {
+				for _, c := range channels {
+					if c.Name == nameOrID && (c.Type == discordgo.ChannelTypeGuildText || c.Type == discordgo.ChannelTypeGuildNews) {
+						_ = store.UpsertChannel(models.Channel{ID: c.ID, Name: c.Name, GuildID: c.GuildID, Type: "text"})
+						return c.ID, nil
+					}
+				}
+			}
+			return "", fmt.Errorf("channel not found in guild: %s", nameOrID)
 		}
 
 		for _, g := range bot.Session().State.Guilds {
@@ -89,6 +102,25 @@ func main() {
 
 	srv := api.NewServer(store, hub, tracker, sendMsg, sendFile, resolveChannel, cfg.APIKey)
 
+	syncGuild := func(guildID string) error {
+		channels, err := bot.Session().GuildChannels(guildID)
+		if err != nil {
+			return err
+		}
+		for _, ch := range channels {
+			if ch.Type == discordgo.ChannelTypeGuildText || ch.Type == discordgo.ChannelTypeGuildNews {
+				_ = store.UpsertChannel(models.Channel{
+					ID:      ch.ID,
+					Name:    ch.Name,
+					GuildID: ch.GuildID,
+					Type:    "text",
+				})
+			}
+		}
+		return nil
+	}
+	srv.SetSyncGuildFn(syncGuild)
+
 	r := chi.NewRouter()
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
@@ -104,7 +136,10 @@ func main() {
 		r.Get("/api/channels", srv.GetChannels)
 		r.Get("/api/channels/{channel}/messages", srv.GetChannelMessages)
 		r.Get("/api/terminal/users", srv.GetTerminalUsers)
+		r.Get("/api/guilds", srv.GetGuilds)
+		r.Get("/api/guilds/{guild_id}/channels", srv.GetGuildChannels)
 	})
+	r.Get("/api/bot/check/{guild_id}", srv.CheckBotGuild)
 
 	r.Get("/ws", func(w http.ResponseWriter, r *http.Request) {
 		websocket.ServeWS(hub, w, r)

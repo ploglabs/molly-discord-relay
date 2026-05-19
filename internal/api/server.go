@@ -23,12 +23,14 @@ type Server struct {
 	sendMsg          SendMessageFunc
 	sendFile         SendFileFunc
 	resolveChannelFn ResolveChannelFunc
+	syncGuildFn      SyncGuildFunc
 	apiKey           string
 }
 
 type SendMessageFunc func(channelID, username, avatarURL, content, replyToID string) (string, error)
 type SendFileFunc func(channelID, username, avatarURL, content, filename string, r io.Reader) (string, error)
-type ResolveChannelFunc func(nameOrID string) (string, error)
+type ResolveChannelFunc func(nameOrID string, guildID string) (string, error)
+type SyncGuildFunc func(guildID string) error
 
 func NewServer(store *storage.Store, hub *websocket.Hub, tracker *presence.Tracker, sendMsg SendMessageFunc, sendFile SendFileFunc, resolveCh ResolveChannelFunc, apiKey string) *Server {
 	return &Server{
@@ -40,6 +42,10 @@ func NewServer(store *storage.Store, hub *websocket.Hub, tracker *presence.Track
 		resolveChannelFn: resolveCh,
 		apiKey:           apiKey,
 	}
+}
+
+func (s *Server) SetSyncGuildFn(fn SyncGuildFunc) {
+	s.syncGuildFn = fn
 }
 
 func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
@@ -111,7 +117,7 @@ func (s *Server) PostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ch, err := s.resolveChannel(req.Channel)
+	ch, err := s.resolveChannel(req.Channel, req.GuildID)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, models.APIResponse{OK: false, Error: "channel not found"})
 		return
@@ -192,7 +198,7 @@ func (s *Server) PostFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	ch, err := s.resolveChannel(channel)
+	ch, err := s.resolveChannel(channel, r.FormValue("guild_id"))
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, models.APIResponse{OK: false, Error: "channel not found"})
 		return
@@ -250,7 +256,7 @@ func (s *Server) GetHistory(w http.ResponseWriter, r *http.Request) {
 	before := r.URL.Query().Get("before")
 	after := r.URL.Query().Get("after")
 
-	chID, err := s.resolveChannel(channel)
+	chID, err := s.resolveChannel(channel, r.URL.Query().Get("guild_id"))
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, models.APIResponse{OK: false, Error: "channel not found"})
 		return
@@ -423,7 +429,7 @@ func (s *Server) GetChannelMessages(w http.ResponseWriter, r *http.Request) {
 		since = t
 	}
 
-	chID, err := s.resolveChannel(channel)
+	chID, err := s.resolveChannel(channel, r.URL.Query().Get("guild_id"))
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, models.APIResponse{OK: false, Error: "channel not found"})
 		return
@@ -455,22 +461,106 @@ func (s *Server) GetChannelMessages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (s *Server) resolveChannel(nameOrID string) (string, error) {
-	ch, err := s.store.GetChannelByName(nameOrID)
-	if err == nil && ch != nil {
-		return ch.ID, nil
-	}
-
-	ch, err = s.store.GetChannelByID(nameOrID)
-	if err == nil && ch != nil {
-		return ch.ID, nil
-	}
-
+func (s *Server) resolveChannel(nameOrID string, guildID string) (string, error) {
 	if s.resolveChannelFn != nil {
-		return s.resolveChannelFn(nameOrID)
+		return s.resolveChannelFn(nameOrID, guildID)
+	}
+
+	ch, err := s.store.GetChannelByID(nameOrID)
+	if err == nil && ch != nil {
+		return ch.ID, nil
+	}
+
+	ch, err = s.store.GetChannelByName(nameOrID)
+	if err == nil && ch != nil {
+		return ch.ID, nil
 	}
 
 	return "", fmt.Errorf("channel not found: %s", nameOrID)
+}
+
+func (s *Server) GetGuilds(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, models.APIResponse{OK: false, Error: "method not allowed"})
+		return
+	}
+
+	guilds, err := s.store.GetGuilds()
+	if err != nil {
+		slog.Error("failed to get guilds", "error", err)
+		writeJSON(w, http.StatusInternalServerError, models.APIResponse{OK: false, Error: "internal error"})
+		return
+	}
+
+	if guilds == nil {
+		guilds = []models.Guild{}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"guilds": guilds})
+}
+
+func (s *Server) GetGuildChannels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, models.APIResponse{OK: false, Error: "method not allowed"})
+		return
+	}
+
+	guildID := chi.URLParam(r, "guild_id")
+	if guildID == "" {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "guild_id is required"})
+		return
+	}
+
+	channels, err := s.store.GetChannelsByGuild(guildID)
+	if err != nil {
+		slog.Error("failed to get guild channels", "error", err)
+		writeJSON(w, http.StatusInternalServerError, models.APIResponse{OK: false, Error: "internal error"})
+		return
+	}
+
+	if channels == nil {
+		channels = []models.Channel{}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"channels": channels})
+}
+
+func (s *Server) CheckBotGuild(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, models.APIResponse{OK: false, Error: "method not allowed"})
+		return
+	}
+
+	guildID := chi.URLParam(r, "guild_id")
+	if guildID == "" {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "guild_id is required"})
+		return
+	}
+
+	hasGuild, err := s.store.HasGuild(guildID)
+	if err != nil {
+		slog.Error("failed to check guild", "error", err)
+		writeJSON(w, http.StatusInternalServerError, models.APIResponse{OK: false, Error: "internal error"})
+		return
+	}
+
+	if !hasGuild && s.syncGuildFn != nil {
+		slog.Info("guild not in DB, attempting live sync", "guild_id", guildID)
+		if syncErr := s.syncGuildFn(guildID); syncErr != nil {
+			slog.Warn("live guild sync failed", "guild_id", guildID, "error", syncErr)
+		} else {
+			hasGuild, _ = s.store.HasGuild(guildID)
+		}
+	}
+
+	msg := "bot is not in this guild"
+	if hasGuild {
+		msg = "bot is in this guild"
+	}
+	writeJSON(w, http.StatusOK, models.BotCheckResponse{
+		OK:         true,
+		BotInGuild: hasGuild,
+		GuildID:    guildID,
+		Message:    msg,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
