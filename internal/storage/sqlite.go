@@ -494,6 +494,70 @@ func (s *Store) DeleteWebhook(channelID string) error {
 	return err
 }
 
+func (s *Store) GetGuilds() ([]models.Guild, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`
+		SELECT DISTINCT c.guild_id, COALESCE(g.name, c.guild_id) as guild_name
+		FROM channels c
+		LEFT JOIN (SELECT guild_id, MIN(name) as name FROM channels WHERE type = 'text' GROUP BY guild_id) g
+			ON c.guild_id = g.guild_id
+		WHERE c.guild_id IS NOT NULL AND c.guild_id != ''
+		ORDER BY guild_name
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var guilds []models.Guild
+	for rows.Next() {
+		var g models.Guild
+		if err := rows.Scan(&g.ID, &g.Name); err != nil {
+			return nil, err
+		}
+		guilds = append(guilds, g)
+	}
+	return guilds, rows.Err()
+}
+
+func (s *Store) GetChannelsByGuild(guildID string) ([]models.Channel, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(
+		"SELECT id, name, guild_id, type FROM channels WHERE guild_id = ? AND type = 'text' ORDER BY name",
+		guildID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var channels []models.Channel
+	for rows.Next() {
+		var c models.Channel
+		if err := rows.Scan(&c.ID, &c.Name, &c.GuildID, &c.Type); err != nil {
+			return nil, err
+		}
+		channels = append(channels, c)
+	}
+	return channels, rows.Err()
+}
+
+func (s *Store) HasGuild(guildID string) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var count int
+	err := s.db.QueryRow(
+		"SELECT COUNT(*) FROM channels WHERE guild_id = ?",
+		guildID,
+	).Scan(&count)
+	return count > 0, err
+}
+
 // LoadAllWebhooks returns all persisted channel→(id,token) pairs for cache preload.
 func (s *Store) LoadAllWebhooks() (map[string][2]string, error) {
 	s.mu.RLock()

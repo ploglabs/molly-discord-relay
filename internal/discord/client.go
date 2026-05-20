@@ -300,6 +300,7 @@ func (b *Bot) getOrCreateWebhook(channelID string) (webhookEntry, error) {
 
 func (b *Bot) addHandlers() {
 	b.session.AddHandler(b.onReady)
+	b.session.AddHandler(b.onGuildCreate)
 	b.session.AddHandler(b.onMessageCreate)
 	b.session.AddHandler(b.onMessageUpdate)
 	b.session.AddHandler(b.onMessageDelete)
@@ -352,6 +353,36 @@ func (b *Bot) onReady(s *discordgo.Session, r *discordgo.Ready) {
 
 func (b *Bot) onRateLimit(s *discordgo.Session, rl *discordgo.RateLimit) {
 	slog.Warn("discord rate limit", "retry_after", rl.RetryAfter)
+}
+
+func (b *Bot) onGuildCreate(s *discordgo.Session, g *discordgo.GuildCreate) {
+	slog.Info("bot joined new guild, syncing channels", "guild_id", g.ID, "guild_name", g.Name)
+
+	channels, err := s.GuildChannels(g.ID)
+	if err != nil {
+		slog.Warn("failed to fetch channels for new guild", "guild_id", g.ID, "error", err)
+		return
+	}
+
+	var synced []models.Channel
+	for _, ch := range channels {
+		if ch.Type != discordgo.ChannelTypeGuildText && ch.Type != discordgo.ChannelTypeGuildNews {
+			continue
+		}
+		synced = append(synced, models.Channel{
+			ID:      ch.ID,
+			Name:    ch.Name,
+			GuildID: ch.GuildID,
+			Type:    "text",
+		})
+	}
+
+	for _, ch := range synced {
+		if err := b.store.UpsertChannel(ch); err != nil {
+			slog.Warn("failed to upsert channel for new guild", "channel", ch.Name, "error", err)
+		}
+	}
+	slog.Info("synced channels for new guild", "guild_id", g.ID, "count", len(synced))
 }
 
 func (b *Bot) broadcast(evt models.RelayEvent) {
