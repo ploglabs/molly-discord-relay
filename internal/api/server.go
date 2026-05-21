@@ -570,3 +570,77 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 		slog.Error("failed to encode JSON response", "error", err)
 	}
 }
+
+func (s *Server) PostSetupConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, models.APIResponse{OK: false, Error: "method not allowed"})
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "failed to read body"})
+		return
+	}
+	defer r.Body.Close()
+
+	var req struct {
+		DiscordID   string `json:"discord_id"`
+		GuildID     string `json:"guild_id"`
+		GuildName   string `json:"guild_name"`
+		ChannelID   string `json:"channel_id"`
+		ChannelName string `json:"channel_name"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "invalid json"})
+		return
+	}
+
+	if req.DiscordID == "" || req.GuildID == "" {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "discord_id and guild_id are required"})
+		return
+	}
+
+	cfg := storage.SetupConfig{
+		DiscordID:   req.DiscordID,
+		GuildID:     req.GuildID,
+		GuildName:   req.GuildName,
+		ChannelID:   req.ChannelID,
+		ChannelName: req.ChannelName,
+	}
+	if err := s.store.SaveSetupConfig(cfg); err != nil {
+		slog.Error("failed to save setup config", "error", err)
+		writeJSON(w, http.StatusInternalServerError, models.APIResponse{OK: false, Error: "internal error"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.APIResponse{OK: true, Message: "config saved"})
+}
+
+func (s *Server) GetSetupConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, models.APIResponse{OK: false, Error: "method not allowed"})
+		return
+	}
+
+	discordID := chi.URLParam(r, "discord_id")
+	if discordID == "" {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "discord_id is required"})
+		return
+	}
+
+	cfg, err := s.store.GetSetupConfig(discordID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, models.APIResponse{OK: false, Error: "no config found"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok":           true,
+		"discord_id":   cfg.DiscordID,
+		"guild_id":     cfg.GuildID,
+		"guild_name":   cfg.GuildName,
+		"channel_id":   cfg.ChannelID,
+		"channel_name": cfg.ChannelName,
+	})
+}

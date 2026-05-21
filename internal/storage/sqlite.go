@@ -48,7 +48,7 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3
 
 func (s *Store) migrate() error {
 	s.mu.Lock()
@@ -112,6 +112,20 @@ func (s *Store) migrate() error {
 			slog.Info("added type column to channels table")
 		}
 		version = 2
+	}
+
+	if version < 3 {
+		if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS setup_configs (
+			discord_id    TEXT PRIMARY KEY,
+			guild_id      TEXT NOT NULL,
+			guild_name    TEXT NOT NULL,
+			channel_id    TEXT NOT NULL,
+			channel_name  TEXT NOT NULL,
+			created_at    DATETIME NOT NULL DEFAULT (datetime('now'))
+		)`); err != nil {
+			return fmt.Errorf("create setup_configs table: %w", err)
+		}
+		version = 3
 	}
 
 	_, err := s.db.Exec("INSERT OR REPLACE INTO _meta (key, value) VALUES ('schema_version', ?)", strconv.Itoa(version))
@@ -578,4 +592,46 @@ func (s *Store) LoadAllWebhooks() (map[string][2]string, error) {
 		out[channelID] = [2]string{webhookID, webhookToken}
 	}
 	return out, rows.Err()
+}
+
+type SetupConfig struct {
+	DiscordID   string `json:"discord_id"`
+	GuildID     string `json:"guild_id"`
+	GuildName   string `json:"guild_name"`
+	ChannelID   string `json:"channel_id"`
+	ChannelName string `json:"channel_name"`
+}
+
+func (s *Store) SaveSetupConfig(cfg SetupConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(
+		"INSERT OR REPLACE INTO setup_configs (discord_id, guild_id, guild_name, channel_id, channel_name) VALUES (?, ?, ?, ?, ?)",
+		cfg.DiscordID, cfg.GuildID, cfg.GuildName, cfg.ChannelID, cfg.ChannelName,
+	)
+	return err
+}
+
+func (s *Store) GetSetupConfig(discordID string) (*SetupConfig, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var cfg SetupConfig
+	err := s.db.QueryRow(
+		"SELECT discord_id, guild_id, guild_name, channel_id, channel_name FROM setup_configs WHERE discord_id = ?",
+		discordID,
+	).Scan(&cfg.DiscordID, &cfg.GuildID, &cfg.GuildName, &cfg.ChannelID, &cfg.ChannelName)
+	if err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+func (s *Store) DeleteSetupConfig(discordID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec("DELETE FROM setup_configs WHERE discord_id = ?", discordID)
+	return err
 }
