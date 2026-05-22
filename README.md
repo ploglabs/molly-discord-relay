@@ -1,6 +1,8 @@
-# Molly Discord Relay
+<p align="center">
+  <img src="logo.png" alt="molly-discord-relay" width="120">
+</p>
 
-<img src="logo.png" alt="molly-discord-relay" width="80" align="right">
+# Molly Discord Relay
 
 Realtime Discord relay backend that connects Discord to terminal clients via WebSockets and REST APIs.
 
