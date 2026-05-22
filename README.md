@@ -119,4 +119,4 @@ sudo systemctl enable --now molly-relay
 
 ## License
 
-MIT
+[Apache License 2.0](LICENSE)
