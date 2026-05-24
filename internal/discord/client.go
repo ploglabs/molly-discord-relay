@@ -327,7 +327,9 @@ func (b *Bot) onReady(s *discordgo.Session, r *discordgo.Ready) {
 	slog.Info("discord ready", "guilds", len(r.Guilds), "user", r.User.String())
 
 	var synced []models.Channel
+	var guilds []models.Guild
 	for _, g := range r.Guilds {
+		guilds = append(guilds, models.Guild{ID: g.ID, Name: g.Name})
 		channels, err := s.GuildChannels(g.ID)
 		if err != nil {
 			slog.Warn("failed to fetch guild channels", "guild_id", g.ID, "error", err)
@@ -346,6 +348,10 @@ func (b *Bot) onReady(s *discordgo.Session, r *discordgo.Ready) {
 		}
 	}
 
+	if err := b.store.ReplaceGuilds(guilds); err != nil {
+		slog.Warn("failed to sync guild snapshot", "error", err)
+	}
+
 	if err := b.store.ReplaceChannels(synced); err != nil {
 		slog.Warn("failed to sync channel snapshot", "error", err)
 	}
@@ -357,6 +363,10 @@ func (b *Bot) onRateLimit(s *discordgo.Session, rl *discordgo.RateLimit) {
 
 func (b *Bot) onGuildCreate(s *discordgo.Session, g *discordgo.GuildCreate) {
 	slog.Info("bot joined new guild, syncing channels", "guild_id", g.ID, "guild_name", g.Name)
+
+	if err := b.store.UpsertGuild(g.ID, g.Name); err != nil {
+		slog.Warn("failed to upsert guild", "guild_id", g.ID, "error", err)
+	}
 
 	channels, err := s.GuildChannels(g.ID)
 	if err != nil {

@@ -167,6 +167,132 @@ func TestGetMessagesByChannelTimestamp_Since(t *testing.T) {
 	}
 }
 
+func TestSearchGuilds(t *testing.T) {
+	s := newTestStore(t)
+
+	channels := []models.Channel{
+		{ID: "ch1", Name: "general", GuildID: "guild-alpha", Type: "text"},
+		{ID: "ch2", Name: "chat", GuildID: "guild-alpha", Type: "text"},
+		{ID: "ch3", Name: "general", GuildID: "guild-beta", Type: "text"},
+		{ID: "ch4", Name: "dev", GuildID: "guild-beta", Type: "text"},
+		{ID: "ch5", Name: "lobby", GuildID: "minecraft-server", Type: "text"},
+	}
+	for _, c := range channels {
+		if err := s.UpsertChannel(c); err != nil {
+			t.Fatalf("upsert channel: %v", err)
+		}
+	}
+
+	t.Run("all guilds (no guilds table entries)", func(t *testing.T) {
+		guilds, err := s.GetGuilds()
+		if err != nil {
+			t.Fatalf("GetGuilds: %v", err)
+		}
+		if len(guilds) != 3 {
+			t.Fatalf("want 3 guilds, got %d", len(guilds))
+		}
+	})
+
+	t.Run("search by guild_id match", func(t *testing.T) {
+		results, err := s.SearchGuilds("mine")
+		if err != nil {
+			t.Fatalf("SearchGuilds: %v", err)
+		}
+		if len(results) != 1 {
+			t.Fatalf("want 1 guild matching 'mine', got %d", len(results))
+		}
+		if results[0].ID != "minecraft-server" {
+			t.Fatalf("want minecraft-server, got %s", results[0].ID)
+		}
+	})
+
+	t.Run("search by guild ID exact", func(t *testing.T) {
+		results, err := s.SearchGuilds("guild-alpha")
+		if err != nil {
+			t.Fatalf("SearchGuilds: %v", err)
+		}
+		if len(results) != 1 {
+			t.Fatalf("want 1 guild, got %d", len(results))
+		}
+		if results[0].ID != "guild-alpha" {
+			t.Fatalf("want guild-alpha, got %s", results[0].ID)
+		}
+	})
+
+	t.Run("search case-insensitive", func(t *testing.T) {
+		results, err := s.SearchGuilds("GUILD-BETA")
+		if err != nil {
+			t.Fatalf("SearchGuilds: %v", err)
+		}
+		if len(results) != 1 {
+			t.Fatalf("want 1 guild, got %d", len(results))
+		}
+		if results[0].ID != "guild-beta" {
+			t.Fatalf("want guild-beta, got %s", results[0].ID)
+		}
+	})
+
+	t.Run("search no match", func(t *testing.T) {
+		results, err := s.SearchGuilds("nonexistent")
+		if err != nil {
+			t.Fatalf("SearchGuilds: %v", err)
+		}
+		if len(results) != 0 {
+			t.Fatalf("want 0 guilds, got %d", len(results))
+		}
+	})
+
+	t.Run("guilds table names take priority", func(t *testing.T) {
+		if err := s.UpsertGuild("guild-alpha", "Alpha Server"); err != nil {
+			t.Fatalf("UpsertGuild: %v", err)
+		}
+		if err := s.UpsertGuild("guild-beta", "Beta Server"); err != nil {
+			t.Fatalf("UpsertGuild: %v", err)
+		}
+		if err := s.UpsertGuild("minecraft-server", "Minecraft Server"); err != nil {
+			t.Fatalf("UpsertGuild: %v", err)
+		}
+
+		results, err := s.GetGuilds()
+		if err != nil {
+			t.Fatalf("GetGuilds: %v", err)
+		}
+		if len(results) != 3 {
+			t.Fatalf("want 3 guilds, got %d", len(results))
+		}
+
+		names := make(map[string]string)
+		for _, g := range results {
+			names[g.ID] = g.Name
+		}
+		if names["guild-alpha"] != "Alpha Server" {
+			t.Errorf("want 'Alpha Server', got %q", names["guild-alpha"])
+		}
+		if names["guild-beta"] != "Beta Server" {
+			t.Errorf("want 'Beta Server', got %q", names["guild-beta"])
+		}
+		if names["minecraft-server"] != "Minecraft Server" {
+			t.Errorf("want 'Minecraft Server', got %q", names["minecraft-server"])
+		}
+
+		searchResults, err := s.SearchGuilds("alpha")
+		if err != nil {
+			t.Fatalf("SearchGuilds: %v", err)
+		}
+		if len(searchResults) != 1 || searchResults[0].ID != "guild-alpha" {
+			t.Errorf("search by real name failed: %+v", searchResults)
+		}
+
+		searchResults, err = s.SearchGuilds("minecraft")
+		if err != nil {
+			t.Fatalf("SearchGuilds: %v", err)
+		}
+		if len(searchResults) != 1 || searchResults[0].ID != "minecraft-server" {
+			t.Errorf("search by real name failed: %+v", searchResults)
+		}
+	})
+}
+
 func TestGetMessagesByChannelTimestamp_BeforeAndSince(t *testing.T) {
 	s := newTestStore(t)
 	base := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)

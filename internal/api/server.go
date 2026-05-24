@@ -485,7 +485,14 @@ func (s *Server) GetGuilds(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	guilds, err := s.store.GetGuilds()
+	q := r.URL.Query().Get("q")
+	var guilds []models.Guild
+	var err error
+	if q != "" {
+		guilds, err = s.store.SearchGuilds(q)
+	} else {
+		guilds, err = s.store.GetGuilds()
+	}
 	if err != nil {
 		slog.Error("failed to get guilds", "error", err)
 		writeJSON(w, http.StatusInternalServerError, models.APIResponse{OK: false, Error: "internal error"})

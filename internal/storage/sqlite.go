@@ -48,7 +48,7 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-const currentSchemaVersion = 3
+const currentSchemaVersion = 4
 
 func (s *Store) migrate() error {
 	s.mu.Lock()
@@ -126,6 +126,16 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("create setup_configs table: %w", err)
 		}
 		version = 3
+	}
+
+	if version < 4 {
+		if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS guilds (
+			id   TEXT PRIMARY KEY,
+			name TEXT NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("create guilds table: %w", err)
+		}
+		version = 4
 	}
 
 	_, err := s.db.Exec("INSERT OR REPLACE INTO _meta (key, value) VALUES ('schema_version', ?)", strconv.Itoa(version))
@@ -386,6 +396,40 @@ func (s *Store) GetAllStatuses() ([]models.Status, error) {
 	return statuses, rows.Err()
 }
 
+func (s *Store) UpsertGuild(id, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(
+		"INSERT INTO guilds (id, name) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name",
+		id, name,
+	)
+	return err
+}
+
+func (s *Store) ReplaceGuilds(guilds []models.Guild) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM guilds"); err != nil {
+		return err
+	}
+
+	for _, g := range guilds {
+		if _, err := tx.Exec("INSERT INTO guilds (id, name) VALUES (?, ?)", g.ID, g.Name); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
 func (s *Store) UpsertChannel(c models.Channel) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -509,17 +553,38 @@ func (s *Store) DeleteWebhook(channelID string) error {
 }
 
 func (s *Store) GetGuilds() ([]models.Guild, error) {
+	return s.SearchGuilds("")
+}
+
+func (s *Store) SearchGuilds(query string) ([]models.Guild, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.Query(`
-		SELECT DISTINCT c.guild_id, COALESCE(g.name, c.guild_id) as guild_name
-		FROM channels c
-		LEFT JOIN (SELECT guild_id, MIN(name) as name FROM channels WHERE type = 'text' GROUP BY guild_id) g
-			ON c.guild_id = g.guild_id
-		WHERE c.guild_id IS NOT NULL AND c.guild_id != ''
-		ORDER BY guild_name
-	`)
+	var rows *sql.Rows
+	var err error
+
+	baseQuery := `
+		SELECT c.gid, COALESCE(gu.name, ch_fallback.name, c.gid) as guild_name
+		FROM (
+			SELECT id as gid FROM guilds
+			UNION
+			SELECT guild_id as gid FROM channels WHERE guild_id IS NOT NULL AND guild_id != ''
+		) c
+		LEFT JOIN guilds gu ON c.gid = gu.id
+		LEFT JOIN (
+			SELECT guild_id, MIN(name) as name FROM channels WHERE type = 'text' GROUP BY guild_id
+		) ch_fallback ON c.gid = ch_fallback.guild_id
+	`
+
+	if query != "" {
+		rows, err = s.db.Query(baseQuery+`
+			WHERE COALESCE(gu.name, ch_fallback.name, c.gid) LIKE ? COLLATE NOCASE
+			   OR c.gid LIKE ? COLLATE NOCASE
+			ORDER BY guild_name
+		`, "%"+query+"%", "%"+query+"%")
+	} else {
+		rows, err = s.db.Query(baseQuery + "ORDER BY guild_name")
+	}
 	if err != nil {
 		return nil, err
 	}
