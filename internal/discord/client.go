@@ -52,7 +52,8 @@ func New(token string, store *storage.Store, hub *websocket.Hub) (*Bot, error) {
 func (b *Bot) Connect() error {
 	slog.Info("connecting to discord gateway")
 
-	b.session.Identify.Intents = discordgo.IntentsGuildMessages |
+	b.session.Identify.Intents = discordgo.IntentsGuilds |
+		discordgo.IntentsGuildMessages |
 		discordgo.IntentMessageContent |
 		discordgo.IntentsGuildMembers |
 		discordgo.IntentsGuildMessageReactions |
