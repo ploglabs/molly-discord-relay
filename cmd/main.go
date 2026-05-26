@@ -138,13 +138,14 @@ func main() {
 		r.Get("/api/terminal/users", srv.GetTerminalUsers)
 		r.Get("/api/guilds", srv.GetGuilds)
 		r.Get("/api/guilds/{guild_id}/channels", srv.GetGuildChannels)
-	})
-	r.Get("/api/bot/check/{guild_id}", srv.CheckBotGuild)
-	r.Post("/api/setup/config", srv.PostSetupConfig)
-	r.Get("/api/setup/config/{discord_id}", srv.GetSetupConfig)
 
-	r.Get("/ws", func(w http.ResponseWriter, r *http.Request) {
-		websocket.ServeWS(hub, w, r)
+		r.Get("/api/bot/check/{guild_id}", srv.CheckBotGuild)
+		r.Post("/api/setup/config", srv.PostSetupConfig)
+		r.Get("/api/setup/config/{discord_id}", srv.GetSetupConfig)
+
+		r.Get("/ws", func(w http.ResponseWriter, r *http.Request) {
+			websocket.ServeWS(hub, w, r)
+		})
 	})
 
 	httpServer := &http.Server{
