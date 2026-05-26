@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -50,17 +51,26 @@ func (s *Server) SetSyncGuildFn(fn SyncGuildFunc) {
 
 func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// API key must always be configured — enforced at startup.
 		if s.apiKey == "" {
+			writeJSON(w, http.StatusInternalServerError, models.APIResponse{OK: false, Error: "server misconfiguration"})
+			return
+		}
+
+		// Accept the key only from the X-API-Key header.
+		// Query-string keys are intentionally NOT accepted: they appear in
+		// access logs, proxy logs, browser history, and Referer headers.
+		key := r.Header.Get("X-API-Key")
+		if key == "" {
+			slog.Warn("missing api key", "path", r.URL.Path, "remote", r.RemoteAddr)
 			writeJSON(w, http.StatusUnauthorized, models.APIResponse{OK: false, Error: "unauthorized"})
 			return
 		}
 
-		key := r.Header.Get("X-API-Key")
-		if key == "" {
-			key = r.URL.Query().Get("api_key")
-		}
-		if key != s.apiKey {
-			slog.Warn("unauthorized request", "path", r.URL.Path, "remote", r.RemoteAddr)
+		// Constant-time comparison prevents timing oracle attacks that could
+		// allow an attacker to brute-force the key character by character.
+		if subtle.ConstantTimeCompare([]byte(key), []byte(s.apiKey)) != 1 {
+			slog.Warn("invalid api key", "path", r.URL.Path, "remote", r.RemoteAddr)
 			writeJSON(w, http.StatusUnauthorized, models.APIResponse{OK: false, Error: "unauthorized"})
 			return
 		}
@@ -304,6 +314,10 @@ func (s *Server) PostStatus(w http.ResponseWriter, r *http.Request) {
 
 	if req.Username == "" {
 		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "username is required"})
+		return
+	}
+	if len(req.Username) > 100 {
+		writeJSON(w, http.StatusBadRequest, models.APIResponse{OK: false, Error: "username exceeds 100 characters"})
 		return
 	}
 	if req.Status == "" {

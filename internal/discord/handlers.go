@@ -18,8 +18,12 @@ func (b *Bot) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) 
 		slog.Debug("suppressed own webhook echo", "webhook_id", m.WebhookID)
 		return
 	}
+	// Drop messages from unknown/third-party webhooks.
+	// Broadcasting them would allow any webhook in the channel to inject
+	// arbitrary events into every connected terminal client.
 	if m.WebhookID != "" {
-		slog.Warn("webhook message not in cache — broadcasting gateway echo (may cause duplication)", "webhook_id", m.WebhookID)
+		slog.Debug("dropped unknown webhook message", "webhook_id", m.WebhookID)
+		return
 	}
 
 	content := b.resolveIncomingMentions(m.Content, m.Mentions)

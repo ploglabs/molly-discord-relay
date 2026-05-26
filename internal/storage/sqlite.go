@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -577,11 +578,14 @@ func (s *Store) SearchGuilds(query string) ([]models.Guild, error) {
 	`
 
 	if query != "" {
+		// Escape LIKE special characters so a search for "%" or "_" matches
+		// the literal character rather than acting as a wildcard.
+		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(query)
 		rows, err = s.db.Query(baseQuery+`
-			WHERE COALESCE(gu.name, ch_fallback.name, c.gid) LIKE ? COLLATE NOCASE
-			   OR c.gid LIKE ? COLLATE NOCASE
+			WHERE COALESCE(gu.name, ch_fallback.name, c.gid) LIKE ? ESCAPE '\' COLLATE NOCASE
+			   OR c.gid LIKE ? ESCAPE '\' COLLATE NOCASE
 			ORDER BY guild_name
-		`, "%"+query+"%", "%"+query+"%")
+		`, "%"+escaped+"%", "%"+escaped+"%")
 	} else {
 		rows, err = s.db.Query(baseQuery + "ORDER BY guild_name")
 	}

@@ -23,11 +23,16 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("DISCORD_TOKEN is required")
 	}
 
+	apiKey := os.Getenv("API_KEY")
+	if apiKey == "" {
+		return nil, fmt.Errorf("API_KEY is required — set a strong random secret in your environment")
+	}
+
 	return &Config{
 		DiscordToken: token,
 		Port:         getEnv("PORT", "8080"),
 		DatabasePath: getEnv("DATABASE_PATH", "./molly.db"),
-		APIKey:       os.Getenv("API_KEY"),
+		APIKey:       apiKey,
 		LogLevel:     getEnv("LOG_LEVEL", "info"),
 	}, nil
 }

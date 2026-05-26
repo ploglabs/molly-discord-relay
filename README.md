@@ -6,15 +6,28 @@
 
 Realtime Discord relay backend that connects Discord to terminal clients via WebSockets and REST APIs.
 
-## Features
+## ⚠️ Security & Trust Model
 
-- Realtime Discord Gateway integration
-- WebSocket event broadcasting
-- Developer presence & activity tracking
-- SQLite persistence
-- Message history APIs
-- Typing indicators
-- Automatic reconnect handling
+> **This relay holds a Discord bot token with privileged gateway intents.**
+> Anyone connecting through the relay is trusting the relay operator for message
+> confidentiality and identity integrity. The relay can read every message in
+> every channel the bot is in, and it stores webhook tokens in its local SQLite
+> database.
+
+**What the bot token allows:**
+- Reading all messages (via `MessageContent` intent)
+- Seeing all server member lists (via `GuildMembers` intent)
+- Seeing typing activity (via `GuildMessageTyping` intent)
+- Creating/executing webhooks to post messages on behalf of users
+
+**Mitigations in place:**
+- All API endpoints require an `X-API-Key` header with a strong shared secret
+- The API key is compared in constant time to prevent timing attacks
+- Webhook tokens are stored only in the local database, not transmitted to clients
+- CORS is restricted to the configured origin (`https://molly.ploglabs.com`)
+
+**Recommendation:** Self-host this relay if you require full control. The relay
+operator can see all traffic passing through it.
 
 ## Architecture
 
@@ -51,7 +64,8 @@ Fill in `.env`:
 DISCORD_TOKEN=your_bot_token
 PORT=8080
 DATABASE_PATH=./molly.db
-API_KEY=optional_secret_key
+# Required — generate with: openssl rand -hex 32
+API_KEY=your_strong_random_secret
 ```
 
 ### Run
@@ -65,6 +79,8 @@ Server starts on `http://localhost:8080`.
 
 ## API Endpoints
 
+All endpoints require the `X-API-Key` header set to your configured `API_KEY`.
+
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/message` | Send a message to a Discord channel |
@@ -73,7 +89,14 @@ Server starts on `http://localhost:8080`.
 | `GET` | `/api/guilds` | List available guilds |
 | `WS` | `/ws` | Realtime WebSocket event stream |
 
-## WebSocket Events
+**Example:**
+```bash
+curl -H "X-API-Key: $API_KEY" https://your-relay/api/guilds
+```
+
+> **Note:** The API key must be sent in the `X-API-Key` header only.
+> Query-string delivery (`?api_key=...`) is not supported because keys in URLs
+> appear in access logs, proxy logs, and browser history.
 
 ```json
 {

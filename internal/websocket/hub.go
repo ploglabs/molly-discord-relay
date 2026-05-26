@@ -18,6 +18,11 @@ type Hub struct {
 
 	usernames map[*Client]string
 	userMu    sync.RWMutex
+
+	// closedSend tracks clients whose send channel has already been closed
+	// by the slow-client eviction path, to prevent a double-close panic in
+	// the unregister handler.
+	closedSend map[*Client]bool
 }
 
 func NewHub() *Hub {
@@ -27,6 +32,7 @@ func NewHub() *Hub {
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		usernames:  make(map[*Client]string),
+		closedSend: make(map[*Client]bool),
 	}
 }
 
@@ -45,7 +51,11 @@ func (h *Hub) Run() {
 			h.mu.Lock()
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
-				close(client.send)
+				// Only close if the slow-eviction path hasn't already closed it.
+				if !h.closedSend[client] {
+					close(client.send)
+				}
+				delete(h.closedSend, client)
 			}
 			h.mu.Unlock()
 			h.clientCount.Add(-1)
@@ -67,9 +77,11 @@ func (h *Hub) Run() {
 				h.mu.Lock()
 				for _, client := range slow {
 					if _, ok := h.clients[client]; ok {
+						h.closedSend[client] = true
 						close(client.send)
 						delete(h.clients, client)
 						h.clientCount.Add(-1)
+						h.RemoveUsername(client)
 					}
 				}
 				h.mu.Unlock()
