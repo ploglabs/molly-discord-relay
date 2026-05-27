@@ -160,6 +160,7 @@ func main() {
 	// Public auth endpoints (no auth middleware).
 	r.Post("/auth/device/authorize", srv.PostDeviceAuthorize)
 	r.Post("/auth/device/token", srv.PostDeviceToken)
+	r.Get("/api/bot/check/{guild_id}", srv.CheckBotGuild)
 
 	r.Group(func(r chi.Router) {
 		r.Use(srv.AuthMiddleware)
@@ -177,7 +178,6 @@ func main() {
 		r.Get("/api/guilds", srv.GetGuilds)
 		r.Get("/api/guilds/{guild_id}/channels", srv.GetGuildChannels)
 
-		r.Get("/api/bot/check/{guild_id}", srv.CheckBotGuild)
 		r.Post("/api/setup/config", srv.PostSetupConfig)
 		r.Get("/api/setup/config/{discord_id}", srv.GetSetupConfig)
 
