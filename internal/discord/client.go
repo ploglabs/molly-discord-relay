@@ -23,14 +23,15 @@ var mentionPattern = regexp.MustCompile(`(^|[\s(])@([A-Za-z0-9_.-]{2,32})`)
 var discordMentionRe = regexp.MustCompile(`<@!?(\d+)>`)
 
 type Bot struct {
-	session      *discordgo.Session
-	store        *storage.Store
-	hub          *websocket.Hub
-	webhookMu    sync.RWMutex
-	webhookCache map[string]webhookEntry
+	session       *discordgo.Session
+	store         *storage.Store
+	hub           *websocket.Hub
+	webhookMu     sync.RWMutex
+	webhookCache  map[string]webhookEntry
+	encryptionKey string // WEBHOOK_ENCRYPTION_KEY hex
 }
 
-func New(token string, store *storage.Store, hub *websocket.Hub) (*Bot, error) {
+func New(token string, store *storage.Store, hub *websocket.Hub, encryptionKey string) (*Bot, error) {
 	token = strings.TrimPrefix(token, "Bot ")
 	s, err := discordgo.New("Bot " + token)
 	if err != nil {
@@ -38,10 +39,11 @@ func New(token string, store *storage.Store, hub *websocket.Hub) (*Bot, error) {
 	}
 
 	b := &Bot{
-		session:      s,
-		store:        store,
-		hub:          hub,
-		webhookCache: make(map[string]webhookEntry),
+		session:       s,
+		store:         store,
+		hub:           hub,
+		webhookCache:  make(map[string]webhookEntry),
+		encryptionKey: encryptionKey,
 	}
 
 	b.addHandlers()
@@ -71,7 +73,7 @@ func (b *Bot) Connect() error {
 }
 
 func (b *Bot) loadWebhookCache() {
-	webhooks, err := b.store.LoadAllWebhooks()
+	webhooks, err := b.store.LoadAllWebhooks(b.encryptionKey)
 	if err != nil {
 		slog.Warn("failed to load webhook cache from db", "error", err)
 		return
@@ -292,7 +294,14 @@ func (b *Bot) getOrCreateWebhook(channelID string) (webhookEntry, error) {
 
 	entry := webhookEntry{ID: wh.ID, Token: wh.Token}
 	b.webhookCache[channelID] = entry
-	if saveErr := b.store.SaveWebhook(channelID, entry.ID, entry.Token); saveErr != nil {
+	// Encrypt webhook token at rest using AES-256-GCM.
+	var saveErr error
+	if b.encryptionKey != "" {
+		saveErr = b.store.SaveWebhookEncrypted(channelID, entry.ID, entry.Token, b.encryptionKey)
+	} else {
+		saveErr = b.store.SaveWebhook(channelID, entry.ID, entry.Token)
+	}
+	if saveErr != nil {
 		slog.Warn("failed to persist webhook token", "channel_id", channelID, "error", saveErr)
 	}
 	slog.Info("created webhook", "channel_id", channelID, "webhook_id", wh.ID)

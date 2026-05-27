@@ -11,6 +11,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/ploglabs/molly-discord-relay/internal/auth"
 	"github.com/ploglabs/molly-discord-relay/internal/models"
 )
 
@@ -49,7 +50,7 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-const currentSchemaVersion = 4
+const currentSchemaVersion = 6
 
 func (s *Store) migrate() error {
 	s.mu.Lock()
@@ -137,6 +138,47 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("create guilds table: %w", err)
 		}
 		version = 4
+	}
+
+	if version < 5 {
+		// Per-user session tokens: store only SHA256(token), never the raw token.
+		if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS sessions (
+			token_hash     TEXT PRIMARY KEY,
+			discord_id     TEXT NOT NULL,
+			username       TEXT NOT NULL,
+			avatar_url     TEXT NOT NULL DEFAULT '',
+			access_token   TEXT NOT NULL DEFAULT '',
+			refresh_token  TEXT NOT NULL DEFAULT '',
+			created_at     DATETIME NOT NULL,
+			expires_at     DATETIME NOT NULL,
+			last_seen_at   DATETIME NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_sessions_discord_id ON sessions(discord_id);
+		CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+
+		CREATE TABLE IF NOT EXISTS device_flows (
+			device_code      TEXT PRIMARY KEY,
+			user_code        TEXT NOT NULL,
+			verification_uri TEXT NOT NULL DEFAULT 'https://discord.com/activate',
+			expires_at       DATETIME NOT NULL,
+			poll_interval    INTEGER NOT NULL DEFAULT 5,
+			status           TEXT NOT NULL DEFAULT 'pending',
+			session_token    TEXT NOT NULL DEFAULT '',
+			discord_id       TEXT NOT NULL DEFAULT '',
+			username         TEXT NOT NULL DEFAULT '',
+			avatar_url       TEXT NOT NULL DEFAULT ''
+		);
+		`); err != nil {
+			return fmt.Errorf("create sessions/device_flows tables: %w", err)
+		}
+		version = 5
+	}
+
+	if version < 6 {
+		// Migrate webhooks table: add encrypted token column, keep old for zero-downtime.
+		// Old webhook_token column stays until all webhooks are re-registered encrypted.
+		_, _ = s.db.Exec(`ALTER TABLE webhooks ADD COLUMN webhook_token_encrypted TEXT NOT NULL DEFAULT ''`)
+		version = 6
 	}
 
 	_, err := s.db.Exec("INSERT OR REPLACE INTO _meta (key, value) VALUES ('schema_version', ?)", strconv.Itoa(version))
@@ -521,7 +563,8 @@ func (s *Store) GetChannelByID(id string) (*models.Channel, error) {
 	return &c, nil
 }
 
-// SaveWebhook persists a webhook token so it survives restarts.
+// SaveWebhook persists a webhook token (plaintext) for backward compatibility.
+// Prefer SaveWebhookEncrypted when an encryption key is available.
 func (s *Store) SaveWebhook(channelID, webhookID, webhookToken string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -533,14 +576,58 @@ func (s *Store) SaveWebhook(channelID, webhookID, webhookToken string) error {
 	return err
 }
 
-// GetWebhook returns the stored webhook entry for a channel, if any.
+// SaveWebhookEncrypted persists a webhook token encrypted with AES-256-GCM.
+// encryptionKeyHex must be a 64-char hex string (32 bytes).
+func (s *Store) SaveWebhookEncrypted(channelID, webhookID, webhookToken, encryptionKeyHex string) error {
+	encrypted, err := auth.Encrypt(webhookToken, encryptionKeyHex, []byte(channelID))
+	if err != nil {
+		return fmt.Errorf("encrypt webhook token: %w", err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err = s.db.Exec(
+		`INSERT OR REPLACE INTO webhooks
+		 (channel_id, webhook_id, webhook_token, webhook_token_encrypted)
+		 VALUES (?, ?, '', ?)`,
+		channelID, webhookID, encrypted,
+	)
+	return err
+}
+
+// GetWebhook returns the stored webhook entry for a channel.
+// If an encrypted token exists and encryptionKeyHex is provided, it decrypts it.
+// Falls back to plaintext token for zero-downtime migration.
 func (s *Store) GetWebhook(channelID string) (id, token string, err error) {
+	return s.GetWebhookWithKey(channelID, "")
+}
+
+// GetWebhookWithKey returns the webhook, decrypting the token if a key is provided.
+func (s *Store) GetWebhookWithKey(channelID, encryptionKeyHex string) (id, token string, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	var plain, encrypted string
 	err = s.db.QueryRow(
-		"SELECT webhook_id, webhook_token FROM webhooks WHERE channel_id = ?", channelID,
-	).Scan(&id, &token)
+		`SELECT webhook_id, COALESCE(webhook_token,''), COALESCE(webhook_token_encrypted,'')
+		 FROM webhooks WHERE channel_id = ?`, channelID,
+	).Scan(&id, &plain, &encrypted)
+	if err != nil {
+		return
+	}
+
+	// Prefer encrypted token if available and key is set.
+	if encrypted != "" && encryptionKeyHex != "" {
+		token, err = auth.Decrypt(encrypted, encryptionKeyHex, []byte(channelID))
+		if err != nil {
+			err = fmt.Errorf("decrypt webhook token for channel %s: %w", channelID, err)
+		}
+		return
+	}
+
+	// Fall back to plaintext (migration period).
+	token = plain
 	return
 }
 
@@ -642,11 +729,15 @@ func (s *Store) HasGuild(guildID string) (bool, error) {
 }
 
 // LoadAllWebhooks returns all persisted channel→(id,token) pairs for cache preload.
-func (s *Store) LoadAllWebhooks() (map[string][2]string, error) {
+// If encryptionKeyHex is provided, encrypted tokens are decrypted; others fall back to plaintext.
+func (s *Store) LoadAllWebhooks(encryptionKeyHex string) (map[string][2]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.Query("SELECT channel_id, webhook_id, webhook_token FROM webhooks")
+	rows, err := s.db.Query(
+		`SELECT channel_id, webhook_id,
+		 COALESCE(webhook_token,''), COALESCE(webhook_token_encrypted,'')
+		 FROM webhooks`)
 	if err != nil {
 		return nil, err
 	}
@@ -654,13 +745,173 @@ func (s *Store) LoadAllWebhooks() (map[string][2]string, error) {
 
 	out := make(map[string][2]string)
 	for rows.Next() {
-		var channelID, webhookID, webhookToken string
-		if err := rows.Scan(&channelID, &webhookID, &webhookToken); err != nil {
+		var channelID, webhookID, plain, encrypted string
+		if err := rows.Scan(&channelID, &webhookID, &plain, &encrypted); err != nil {
 			return nil, err
 		}
-		out[channelID] = [2]string{webhookID, webhookToken}
+		token := plain
+		if encrypted != "" && encryptionKeyHex != "" {
+			if dec, err := auth.Decrypt(encrypted, encryptionKeyHex, []byte(channelID)); err == nil {
+				token = dec
+			} else {
+				slog.Warn("failed to decrypt webhook token", "channel_id", channelID, "error", err)
+			}
+		}
+		out[channelID] = [2]string{webhookID, token}
 	}
 	return out, rows.Err()
+}
+
+// --- Session management ---
+
+// SaveSession persists a new session. Only the token hash is stored, never the raw token.
+func (s *Store) SaveSession(sess auth.Session) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Enforce max 5 active sessions per Discord user: delete oldest if over limit.
+	var count int
+	s.db.QueryRow("SELECT COUNT(*) FROM sessions WHERE discord_id = ?", sess.DiscordID).Scan(&count)
+	if count >= 5 {
+		_, _ = s.db.Exec(
+			`DELETE FROM sessions WHERE token_hash IN (
+				SELECT token_hash FROM sessions WHERE discord_id = ?
+				ORDER BY last_seen_at ASC LIMIT ?)`,
+			sess.DiscordID, count-4,
+		)
+	}
+
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO sessions
+		 (token_hash, discord_id, username, avatar_url, access_token, refresh_token,
+		  created_at, expires_at, last_seen_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sess.TokenHash, sess.DiscordID, sess.Username, sess.AvatarURL,
+		sess.AccessToken, sess.RefreshToken,
+		sess.CreatedAt, sess.ExpiresAt, sess.LastSeenAt,
+	)
+	return err
+}
+
+// GetSessionByHash retrieves a session by its token hash and updates last_seen_at.
+func (s *Store) GetSessionByHash(tokenHash string) (*auth.Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var sess auth.Session
+	err := s.db.QueryRow(
+		`SELECT token_hash, discord_id, username, avatar_url, access_token, refresh_token,
+		        created_at, expires_at, last_seen_at
+		 FROM sessions WHERE token_hash = ?`, tokenHash,
+	).Scan(
+		&sess.TokenHash, &sess.DiscordID, &sess.Username, &sess.AvatarURL,
+		&sess.AccessToken, &sess.RefreshToken,
+		&sess.CreatedAt, &sess.ExpiresAt, &sess.LastSeenAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Update last_seen_at asynchronously — don't block on lock.
+	go func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		_, _ = s.db.Exec(
+			"UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?",
+			time.Now(), tokenHash,
+		)
+	}()
+
+	return &sess, nil
+}
+
+// DeleteSession removes a session by its token hash (logout/revoke).
+func (s *Store) DeleteSession(tokenHash string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec("DELETE FROM sessions WHERE token_hash = ?", tokenHash)
+	return err
+}
+
+// CleanupSessions removes expired sessions and those idle for >7 days.
+func (s *Store) CleanupSessions() (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.Exec(
+		`DELETE FROM sessions WHERE
+		 expires_at < datetime('now')
+		 OR last_seen_at < datetime('now', '-7 days')`,
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// --- Device flow management ---
+
+// SaveDeviceFlow persists a pending device authorization flow.
+func (s *Store) SaveDeviceFlow(flow auth.DeviceFlowState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO device_flows
+		 (device_code, user_code, verification_uri, expires_at, poll_interval,
+		  status, session_token, discord_id, username, avatar_url)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		flow.DeviceCode, flow.UserCode, flow.VerificationURI, flow.ExpiresAt,
+		flow.Interval, flow.Status, flow.SessionToken, flow.DiscordID,
+		flow.Username, flow.AvatarURL,
+	)
+	return err
+}
+
+// GetDeviceFlow retrieves a device flow by its device code.
+func (s *Store) GetDeviceFlow(deviceCode string) (*auth.DeviceFlowState, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var flow auth.DeviceFlowState
+	err := s.db.QueryRow(
+		`SELECT device_code, user_code, verification_uri, expires_at, poll_interval,
+		        status, session_token, discord_id, username, avatar_url
+		 FROM device_flows WHERE device_code = ?`, deviceCode,
+	).Scan(
+		&flow.DeviceCode, &flow.UserCode, &flow.VerificationURI, &flow.ExpiresAt,
+		&flow.Interval, &flow.Status, &flow.SessionToken, &flow.DiscordID,
+		&flow.Username, &flow.AvatarURL,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &flow, nil
+}
+
+// UpdateDeviceFlow updates status, session_token, and identity fields for a flow.
+func (s *Store) UpdateDeviceFlow(deviceCode, status, sessionToken, discordID, username, avatarURL string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(
+		`UPDATE device_flows
+		 SET status = ?, session_token = ?, discord_id = ?, username = ?, avatar_url = ?
+		 WHERE device_code = ?`,
+		status, sessionToken, discordID, username, avatarURL, deviceCode,
+	)
+	return err
+}
+
+// CleanupDeviceFlows removes expired device flows.
+func (s *Store) CleanupDeviceFlows() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec("DELETE FROM device_flows WHERE expires_at < datetime('now')")
+	return err
 }
 
 type SetupConfig struct {
